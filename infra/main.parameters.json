@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "namePrefix": { "value": "${AZURE_NAME_PREFIX=vmagent}" },
+    "location": { "value": "${AZURE_LOCATION=australiaeast}" },
+    "targetSubscriptionId": { "value": "${VM_TARGET_SUBSCRIPTION_ID=01e2f327-74ac-451e-8ad9-1f923a06d634}" },
+    "foundryProjectEndpoint": { "value": "${FOUNDRY_PROJECT_ENDPOINT}" },
+    "hostedAgentName": { "value": "${HOSTED_AGENT_NAME=vmagent-agent}" }
+  }
+}

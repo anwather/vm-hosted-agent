@@ -1,0 +1,6 @@
+body { font-family: system-ui, sans-serif; margin: 0; }
+header { padding: 0.75rem 1rem; background: #0a2540; color: #fff; display: flex; justify-content: space-between; align-items: center; }
+main { display: grid; grid-template-columns: 1fr 320px 380px; height: calc(100vh - 56px); }
+section, aside { padding: 1rem; overflow: auto; border-left: 1px solid #eee; }
+section.chat { border-left: none; }
+.logs pre { background: #111; color: #cfc; padding: 0.5rem; border-radius: 4px; min-height: 200px; }

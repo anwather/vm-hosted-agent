@@ -1,0 +1,6 @@
+azure-ai-agentserver-core
+azure-ai-agentserver-responses
+azure-identity>=1.17.0
+azure-keyvault-secrets>=4.8.0
+azure-monitor-opentelemetry
+openai>=1.50.0

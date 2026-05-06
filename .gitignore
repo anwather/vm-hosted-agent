@@ -1,0 +1,17 @@
+.azure/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+node_modules/
+dist/
+build/
+.DS_Store
+*.log
