@@ -6,7 +6,7 @@
     "location": { "value": "${AZURE_LOCATION}" },
     "targetSubscriptionId": { "value": "${VM_TARGET_SUBSCRIPTION_ID=${AZURE_SUBSCRIPTION_ID}}" },
     "foundryProjectEndpoint": { "value": "${FOUNDRY_PROJECT_ENDPOINT}" },
-    "hostedAgentName": { "value": "${HOSTED_AGENT_NAME=vmagent-agent-windows}" }
+    "hostedAgentName": { "value": "${HOSTED_AGENT_NAME=vmagent-agent}" }
   }
 }
 

@@ -15,6 +15,7 @@ services:
     docker:
       path: Dockerfile
       context: .
+      remoteBuild: true
 
 hooks:
   preprovision:

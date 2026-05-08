@@ -44,6 +44,43 @@ az acr build `
     --no-logs | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "az acr build failed" }
 
+# Grant AcrPull on the new ACR to the Foundry project's system-assigned
+# managed identity. The project MI is what Foundry uses to pull the
+# hosted-agent container image when create_version is called. Without
+# this, the very first version provisioning fails with
+# "Failed to pull container image". Idempotent — az role assignment create
+# returns success if the assignment already exists.
+$foundryRg2     = Need 'FOUNDRY_RG'
+$foundryAcct2   = Need 'FOUNDRY_ACCOUNT_NAME'
+$foundryProj2   = Need 'FOUNDRY_PROJECT_NAME'
+$subId2         = if ($env:VM_TARGET_SUBSCRIPTION_ID) { $env:VM_TARGET_SUBSCRIPTION_ID } else { Need 'AZURE_SUBSCRIPTION_ID' }
+$projUri        = "https://management.azure.com/subscriptions/$subId2/resourceGroups/$foundryRg2/providers/Microsoft.CognitiveServices/accounts/$foundryAcct2/projects/$foundryProj2" + '?api-version=2025-06-01'
+
+Write-Host "postprovision: fetching Foundry project system-assigned MI principalId"
+$projMiPid = az rest --method get --uri $projUri --query 'identity.principalId' -o tsv 2>$null
+if ([string]::IsNullOrWhiteSpace($projMiPid) -or $projMiPid -eq 'null') {
+    # Fall back to the account's MI (some Foundry deployments use the account MI for pulls).
+    $acctUri   = "https://management.azure.com/subscriptions/$subId2/resourceGroups/$foundryRg2/providers/Microsoft.CognitiveServices/accounts/$foundryAcct2" + '?api-version=2025-06-01'
+    $projMiPid = az rest --method get --uri $acctUri --query 'identity.principalId' -o tsv 2>$null
+}
+if ([string]::IsNullOrWhiteSpace($projMiPid) -or $projMiPid -eq 'null') {
+    throw "Could not resolve Foundry project/account system-assigned MI principalId. Ensure the Foundry account has a system-assigned identity enabled."
+}
+
+$acrId = az acr show -n $acr -g $rg --query id -o tsv
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($acrId)) { throw "Could not resolve ACR id for $acr" }
+
+Write-Host "postprovision: granting AcrPull on $acr to Foundry MI $projMiPid"
+az role assignment create `
+    --assignee-object-id $projMiPid `
+    --assignee-principal-type ServicePrincipal `
+    --role 'AcrPull' `
+    --scope $acrId 2>&1 | Out-Null
+# rc != 0 with "already exists" message is fine; only fail if scope/principal genuinely bad.
+# Allow up to 60s for AAD propagation before downstream image pulls.
+Write-Host "postprovision: waiting 60s for AcrPull RBAC propagation"
+Start-Sleep -Seconds 60
+
 # Derive KEYVAULT_NAME from URI if not already set (bicep emits both).
 if (-not $env:KEYVAULT_NAME -and $env:KEYVAULT_URI) {
     if ($env:KEYVAULT_URI -match '^https?://([^.]+)\.vault\.azure\.net/?$') {
@@ -66,5 +103,13 @@ if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
 Write-Host "postprovision: deploying orchestrator + 3 hosted agents to Foundry"
 python "$repoRoot/deploy/deploy_all.py"
 if ($LASTEXITCODE -ne 0) { throw "deploy_all.py failed" }
+
+if ($env:EASY_AUTH_ENABLED -eq 'true') {
+    Write-Host "postprovision: configuring Easy Auth (Entra SSO) on frontend container app"
+    & "$PSScriptRoot/easyauth.ps1"
+    if ($LASTEXITCODE -ne 0) { throw "easyauth.ps1 failed" }
+} else {
+    Write-Host "postprovision: Easy Auth disabled (set 'azd env set EASY_AUTH_ENABLED true' to enable)"
+}
 
 Write-Host "postprovision: complete. Run 'azd deploy' to push the frontend image."

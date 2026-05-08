@@ -97,7 +97,9 @@ public or extend `agent/tools/git_clone.py` to inject a PAT). Subfolders
 
 * Tenant role **Application Administrator** (or Cloud Application
   Administrator / Global Administrator) on the deployer account — required
-  to create the Entra App Registration used for Easy Auth in step 5.
+  to create the Entra App Registration used for Easy Auth.
+  **Only needed if you opt in** with `azd env set EASY_AUTH_ENABLED true`;
+  the frontend is anonymous by default.
 * Tenant role **User Access Administrator** (or Owner) at the target
   subscription — required for `assign_rbac.py` to grant the hosted agent's
   managed identity Contributor + data-plane roles. `Contributor` alone is
@@ -115,10 +117,21 @@ public or extend `agent/tools/git_clone.py` to inject a PAT). Subfolders
   four agents (orchestrator + windows + linux + pricing) share the single
   deployment.
 * A **capability host** must exist on the Foundry CognitiveServices account
-  before hosted agents can be created. Provision it via the Foundry portal
-  (**Project → Settings → Capability hosts → Add → "HostedAgents-V1Preview"**)
-  or with the `azureaifoundry` CLI extension. Without this, the first
-  `deploy_agent.py` call returns `400: capability host not found`.
+  before hosted agents can be created. **The `azd` path provisions this
+  automatically** via `infra/hooks/preprovision.{ps1,sh}` (idempotent
+  ARM PUT to `Microsoft.CognitiveServices/accounts/{acct}/capabilityHosts/agents?api-version=2025-10-01-preview`
+  with body `{"properties":{"capabilityHostKind":"Agents"}}`). For the
+  manual quickstart you must run this yourself before `deploy_all.py`:
+  ```powershell
+  $sub = (az account show --query id -o tsv)
+  $capUri = "https://management.azure.com/subscriptions/$sub/resourceGroups/<FOUNDRY_RG>/providers/Microsoft.CognitiveServices/accounts/<FOUNDRY_ACCT>/capabilityHosts/agents?api-version=2025-10-01-preview"
+  $bodyFile = Join-Path $env:TEMP "caphost.json"
+  '{ "properties": { "capabilityHostKind": "Agents" } }' | Out-File $bodyFile -Encoding ascii -NoNewline
+  az rest --method put --uri $capUri --headers "Content-Type=application/json" --body "@$bodyFile"
+  # Wait ~3-4 min, then poll until provisioningState=Succeeded:
+  az rest --method get --uri $capUri --query properties.provisioningState -o tsv
+  ```
+  Without it, the first `deploy_agent.py` call returns `400: capability host not found`.
 * The Foundry account must allow outbound to ACR (default allow-all is fine)
   so it can pull the agent image. The ACR is created by the Bicep with
   anonymous-pull **disabled**; the Foundry hosted-agent runtime authenticates
@@ -132,7 +145,18 @@ public or extend `agent/tools/git_clone.py` to inject a PAT). Subfolders
 * **Python ≥ 3.11** with `python -m pip install -r requirements-deploy.txt`.
 * **PowerShell 7+** if you use `deploy/build_and_push.ps1` (works on
   Linux/macOS too via `pwsh`).
-* No Docker required — image builds run in ACR Tasks (`az acr build`).
+* No Docker required — both paths build images in ACR:
+  * **azd path**: `azure.yaml` declares `remoteBuild: true` for the
+    `frontend` service, so `azd deploy frontend` uploads the build context
+    to ACR and runs the build there. The hosted-agent image is built by
+    `infra/hooks/postprovision.{ps1,sh}` via `az acr build` before
+    `deploy_all.py` runs.
+  * **Manual path**: `deploy/build_and_push.ps1` (and the README snippets)
+    use `az acr build`.
+
+  If you'd prefer a local Docker build (faster on a warm cache), remove
+  `remoteBuild: true` from `azure.yaml` and ensure Docker Desktop is
+  running before `azd up`.
 
 ### Network & policy
 
@@ -162,18 +186,23 @@ azd up                                  # provision infra, build agent image, de
 ```
 
 `azd up` will:
-1. Run `preprovision` to validate `FOUNDRY_PROJECT_ENDPOINT` + `FOUNDRY_RG`
-   and derive `FOUNDRY_ACCOUNT_NAME` / `FOUNDRY_PROJECT_NAME` into the
-   azd env.
+1. Run `preprovision` to validate `FOUNDRY_PROJECT_ENDPOINT` + `FOUNDRY_RG`,
+   derive `FOUNDRY_ACCOUNT_NAME` / `FOUNDRY_PROJECT_NAME` into the azd env,
+   and PUT the Foundry account's `agents` capability host (idempotent).
 2. Provision infra (`infra/main.bicep`).
 3. Run `postprovision` to:
    * `az acr build` the agent image into the new ACR
    * `python deploy/deploy_all.py` to (re)create the orchestrator + windows
      + linux + pricing hosted agents and assign RBAC to each new MI
-4. Build & deploy the frontend container app image (`services.frontend`).
+4. Build & deploy the frontend container app image. Build runs **remotely
+   in ACR** (via `remoteBuild: true` in `azure.yaml`) — no local Docker
+   daemon required.
 
-Easy Auth (Entra) is **not** automated — see the manual step below; you
-only need to do this once per environment.
+Easy Auth (Entra SSO) is **opt-in via `azd env set EASY_AUTH_ENABLED true`**.
+When enabled, the postprovision hook (`infra/hooks/easyauth.ps1`) idempotently
+creates the Entra app registration, generates a client secret, and wires the
+container app's auth config — no manual step required. See
+[**Optional: Easy Auth (Entra SSO)**](#optional-easy-auth-entra-sso) below.
 
 To re-deploy just the agent code:
 ```powershell
@@ -185,6 +214,50 @@ To re-deploy just the frontend:
 azd deploy frontend
 ```
 
+### Optional: Easy Auth (Entra SSO)
+
+The frontend container app is **anonymous by default** (no auth at the
+ingress). To require Entra ID sign-in for everyone hitting the public URL,
+opt in once before `azd up`:
+
+```powershell
+azd env set EASY_AUTH_ENABLED true
+azd up                    # or `azd provision` if you've already run it
+```
+
+The postprovision hook (`infra/hooks/easyauth.ps1`, with a posix twin
+`easyauth.sh`) will:
+
+1. Create or update an Entra app registration named
+   `<frontend-app-name>-easyauth` with redirect URI
+   `https://<fqdn>/.auth/login/aad/callback`.
+2. Generate a 1-year client secret (only on first run; reuses existing
+   secret on subsequent runs — pass `-Rotate` to force rotation).
+3. Wire `az containerapp auth microsoft update` and require sign-in
+   (`--action RedirectToLoginPage`).
+4. Persist `EASY_AUTH_APP_ID` + `EASY_AUTH_APP_DISPLAY_NAME` back to the
+   azd env so subsequent runs are idempotent.
+
+**Required permissions on the deployer account:**
+* **Application Administrator** (or Cloud Application Admin / Global
+  Admin) on the tenant — to create the app registration.
+* **Owner** or **Contributor** on the resource group — already needed for
+  the rest of the deploy.
+
+To rotate the secret manually any time:
+```powershell
+$env:EASY_AUTH_ENABLED = 'true'
+.\infra\hooks\easyauth.ps1 -Rotate
+```
+
+To remove Easy Auth:
+```powershell
+az containerapp auth update -n <frontend-app-name> -g <rg> --enabled false
+azd env set EASY_AUTH_ENABLED false
+```
+(The Entra app registration persists — delete it manually with
+`az ad app delete --id $(azd env get-value EASY_AUTH_APP_ID)` if desired.)
+
 ## Quickstart (manual, without azd)
 
 Replace placeholders (`<...>`) with your values. Image versions shown
@@ -195,6 +268,15 @@ Replace placeholders (`<...>`) with your values. Image versions shown
 python -m pip install -r requirements-deploy.txt
 az login
 az account set --subscription <TARGET_SUB_ID>
+
+# 0a) Ensure the Foundry account has its 'agents' capability host (see
+#     pre-reqs). Skip if you already provisioned it. Idempotent.
+$sub = (az account show --query id -o tsv)
+$capUri = "https://management.azure.com/subscriptions/$sub/resourceGroups/<FOUNDRY_RG>/providers/Microsoft.CognitiveServices/accounts/<FOUNDRY_ACCT>/capabilityHosts/agents?api-version=2025-10-01-preview"
+$bodyFile = Join-Path $env:TEMP "caphost.json"
+'{ "properties": { "capabilityHostKind": "Agents" } }' | Out-File $bodyFile -Encoding ascii -NoNewline
+az rest --method put --uri $capUri --headers "Content-Type=application/json" --body "@$bodyFile" | Out-Null
+do { Start-Sleep 10; $s = az rest --method get --uri $capUri --query properties.provisioningState -o tsv; "  capabilityHost state=$s" } while ($s -notin 'Succeeded','Failed','Canceled')
 
 # 1) Provision infra
 az group create -n multi-agent-demo -l australiaeast
