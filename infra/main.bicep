@@ -21,7 +21,7 @@ param hostedAgentName string = '${namePrefix}-agent'
 param orchestratorAgentName string = 'taskorch-orchestrator'
 
 @description('Hosted Windows VM agent name')
-param hostedAgentNameWindows string = hostedAgentName
+param hostedAgentNameWindows string = '${hostedAgentName}-windows'
 
 @description('Hosted Linux VM agent name')
 param hostedAgentNameLinux string = '${hostedAgentName}-linux'
@@ -30,7 +30,7 @@ param hostedAgentNameLinux string = '${hostedAgentName}-linux'
 param hostedAgentNamePricing string = '${hostedAgentName}-pricing'
 
 @description('Frontend image version label (shown in footer)')
-param frontendVersion string = '0.4.3'
+param frontendVersion string = '0.5.1'
 
 var resourceToken = toLower(uniqueString(subscription().id, resourceGroup().id, namePrefix))
 var shortToken = substring(resourceToken, 0, 6)

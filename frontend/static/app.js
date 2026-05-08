@@ -1,33 +1,26 @@
 // SSE chat client for Task Orchestrator (caller-stack multi-agent routing).
 //
 // State model:
-//   conversations: Map<agentName, history[]>  // per-agent message history
-//   callerStack: agentName[]                   // stack of who called whom
-//   activeAgent: agentName                     // who the user is talking to
+//   conversations: Map<agentName, history[]>   per-agent message history
+//   callerStack: agentName[]                   stack of who called whom
+//   activeAgent: agentName                     who the user is talking to
 //
-// Routing markers (intercepted server-side, surfaced as SSE `routing` events):
-//   forward { direction:"forward", target:"windows|linux|pricing", summary? }
-//     -> push current agent onto callerStack; switch to target; replay
-//        either the original user message (orchestrator -> specialist) or
-//        the summary as the seed prompt (specialist -> pricing).
-//   back    { direction:"back", summary? }
-//     -> pop callerStack; switch back; auto-send `[handback from <fromAgent>:
-//        <summary>]` to the caller as a user-role turn so the caller
-//        immediately greets/summarises/routes without waiting for the user.
+// UI model (Phase O):
+//   Right pane = single "Agent activity" timeline. Each time setActiveAgent
+//   transitions to a new agent, we close+collapse the previous card and
+//   append a fresh card for the new active agent. Tool calls render as
+//   collapsible <details> rows under the active card. Card status dot
+//   rolls up its rows: any in_progress=>yellow, any error=>red, else green.
 
 const messagesEl = document.getElementById("messages");
-const toolsEl = document.getElementById("tools-list");
-const tfLogEl = document.getElementById("tf-log");
+const activityEl = document.getElementById("activity");
 const form = document.getElementById("chat-form");
 const input = document.getElementById("message");
 const sendBtn = document.getElementById("send");
 const headerEl = document.querySelector("header");
 const activeAgentDisplay = document.getElementById("active-agent-display");
-const handoffBanner = document.getElementById("handoff-banner");
-const handoffTargetEl = document.getElementById("handoff-target");
-const handbackBanner = document.getElementById("handback-banner");
-const handbackTargetEl = document.getElementById("handback-target");
 const startOverBtn = document.getElementById("start-over");
+const themeToggleBtn = document.getElementById("theme-toggle");
 
 const ORCHESTRATOR = headerEl.dataset.orchestrator;
 const AGENT_WINDOWS = headerEl.dataset.agentWindows;
@@ -44,19 +37,55 @@ const AGENTS = {
 
 // Per-agent conversation history.
 let conversations = new Map();
-// Stack of agent names representing who delegated to whom. Top = most
-// recent caller of the current active agent.
+// Stack of agent names representing who delegated to whom.
 let callerStack = [];
 // Currently active agent name (default: orchestrator).
 let activeAgent = ORCHESTRATOR;
 
 // Per-turn state.
-let pendingForward = null;       // { target, targetAgent, summary }
-let pendingHandback = null;      // { summary }
+let pendingForward = null;
+let pendingHandback = null;
 let lastUserMessageForTurn = null;
 let currentAssistantText = "";
 
+// callId -> { rowEl, cardEl, toolName, status }
 const toolCallIndex = new Map();
+// Active agent card (the one new tool calls are appended to).
+let activeAgentCard = null;
+// "Thinking" placeholder bubble (visible while a turn is in flight).
+let thinkingBubble = null;
+
+function shortAgentLabel(name) {
+  if (!name) return "agent";
+  if (name === ORCHESTRATOR) return "orchestrator";
+  if (name === AGENT_WINDOWS) return "windows agent";
+  if (name === AGENT_LINUX) return "linux agent";
+  if (name === AGENT_PRICING) return "pricing agent";
+  return name;
+}
+
+function showThinking(label) {
+  if (thinkingBubble) {
+    const lab = thinkingBubble.querySelector(".label");
+    if (lab) lab.textContent = label || `${shortAgentLabel(activeAgent)} is thinking…`;
+    return;
+  }
+  const div = document.createElement("div");
+  div.className = "bubble thinking";
+  div.innerHTML =
+    '<span class="dot"></span><span class="dot"></span><span class="dot"></span>' +
+    `<span class="label">${label || shortAgentLabel(activeAgent) + " is thinking\u2026"}</span>`;
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  thinkingBubble = div;
+}
+
+function hideThinking() {
+  if (thinkingBubble) {
+    thinkingBubble.remove();
+    thinkingBubble = null;
+  }
+}
 
 const tokenTotalEl = document.getElementById("token-total");
 const tokenInEl = document.getElementById("token-in");
@@ -65,27 +94,90 @@ const sessionTokens = { input: 0, output: 0, total: 0, estimated: false };
 
 function fmt(n) { return n.toLocaleString(); }
 
+// ---------- Theme ----------
+
+function applyTheme(theme) {
+  document.documentElement.setAttribute("data-theme", theme);
+  if (themeToggleBtn) themeToggleBtn.textContent = theme === "light" ? "☀️" : "🌙";
+  try { localStorage.setItem("vmagent-theme", theme); } catch (e) { /* ignore */ }
+}
+function initTheme() {
+  let saved = "dark";
+  try { saved = localStorage.getItem("vmagent-theme") || "dark"; } catch (e) { /* ignore */ }
+  applyTheme(saved);
+}
+if (themeToggleBtn) {
+  themeToggleBtn.addEventListener("click", () => {
+    const cur = document.documentElement.getAttribute("data-theme") || "dark";
+    applyTheme(cur === "light" ? "dark" : "light");
+  });
+}
+initTheme();
+
+// ---------- Active agent / activity cards ----------
+
+function createAgentCard(name) {
+  const li = document.createElement("li");
+  li.className = "agent-card status-yellow";
+  li.dataset.agent = name;
+  li.innerHTML = `
+    <div class="agent-card-head">
+      <span class="status-dot"></span>
+      <span class="agent-name"></span>
+      <span class="agent-tool-count">0 tools</span>
+      <span class="caret">▾</span>
+    </div>
+    <div class="agent-card-body">
+      <ul class="tool-rows"><li class="empty">waiting for tool calls…</li></ul>
+    </div>`;
+  li.querySelector(".agent-name").textContent = name;
+  li.querySelector(".agent-card-head").addEventListener("click", () => {
+    li.classList.toggle("collapsed");
+  });
+  activityEl.appendChild(li);
+  activityEl.scrollTop = activityEl.scrollHeight;
+  return li;
+}
+
+function setCardStatus(card, status) {
+  if (!card) return;
+  card.classList.remove("status-yellow", "status-green", "status-red");
+  card.classList.add(`status-${status}`);
+}
+
+function rollupCardStatus(card) {
+  if (!card) return;
+  const rows = card.querySelectorAll(".tool-row");
+  if (!rows.length) { setCardStatus(card, "yellow"); return; }
+  let anyInProgress = false, anyError = false;
+  rows.forEach(r => {
+    if (r.classList.contains("status-yellow")) anyInProgress = true;
+    if (r.classList.contains("status-red")) anyError = true;
+  });
+  if (anyError) setCardStatus(card, "red");
+  else if (anyInProgress) setCardStatus(card, "yellow");
+  else setCardStatus(card, "green");
+}
+
 function setActiveAgent(name) {
+  // If switching to a different agent, finalise + collapse previous card.
+  if (activeAgentCard && activeAgentCard.dataset.agent !== name) {
+    // Roll up any leftover state on the previous card; if everything was
+    // green/done, leave it green; otherwise mark green as the "card finished
+    // its turn" signal (errors stay red; in-progress shouldn't really happen
+    // by handoff time but if it does we mark green to avoid spinning).
+    const prev = activeAgentCard;
+    const hasErr = prev.querySelector(".tool-row.status-red");
+    setCardStatus(prev, hasErr ? "red" : "green");
+    prev.classList.add("collapsed");
+    activeAgentCard = null;
+  }
   activeAgent = name;
   activeAgentDisplay.textContent = name;
-}
-
-function showForwardBanner(target) {
-  const targetAgent = AGENTS[target] || target;
-  handoffTargetEl.textContent = targetAgent;
-  handoffBanner.hidden = false;
-  handbackBanner.hidden = true;
-}
-
-function showHandbackBanner(callerAgent) {
-  handbackTargetEl.textContent = callerAgent;
-  handbackBanner.hidden = false;
-  handoffBanner.hidden = true;
-}
-
-function clearBanners() {
-  handoffBanner.hidden = true;
-  handbackBanner.hidden = true;
+  // Always append a fresh card on transition (including initial set).
+  if (!activeAgentCard) {
+    activeAgentCard = createAgentCard(name);
+  }
 }
 
 function getHistory(agent) {
@@ -94,16 +186,32 @@ function getHistory(agent) {
   return h;
 }
 
-function pushSyntheticHandbackNote(agent, summary) {
-  // Deprecated — see handback flow in `done` handler. Kept as no-op for
-  // safety in case any callsite still references it.
-  return;
+// ---------- Chat / dividers ----------
+
+function appendBubble(role, text) {
+  const div = document.createElement("div");
+  div.className = `bubble ${role}`;
+  div.textContent = text;
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return div;
+}
+
+function appendDivider(text) {
+  const div = document.createElement("div");
+  div.className = "chat-divider";
+  const span = document.createElement("span");
+  span.className = "divider-text";
+  span.textContent = text;
+  div.appendChild(span);
+  messagesEl.appendChild(div);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return div;
 }
 
 function renderMarkdown(text) {
   if (!text) return "";
   if (typeof marked === "undefined" || typeof DOMPurify === "undefined") {
-    // Libraries failed to load — fall back to escaped text with line breaks.
     const div = document.createElement("div");
     div.textContent = text;
     return div.innerHTML.replace(/\n/g, "<br>");
@@ -111,6 +219,8 @@ function renderMarkdown(text) {
   marked.setOptions({ gfm: true, breaks: true });
   return DOMPurify.sanitize(marked.parse(text));
 }
+
+// ---------- Token usage ----------
 
 function addUsage(usage) {
   if (!usage || typeof usage !== "object") return;
@@ -154,41 +264,93 @@ function maybeCountUsage(data) {
   addUsage(usage);
 }
 
-function appendBubble(role, text) {
-  const div = document.createElement("div");
-  div.className = `bubble ${role}`;
-  div.textContent = text;
-  messagesEl.appendChild(div);
-  messagesEl.scrollTop = messagesEl.scrollHeight;
-  return div;
+// ---------- Tool rows ----------
+
+function shortSummary(text, max = 60) {
+  if (text === undefined || text === null) return "";
+  let s = typeof text === "string" ? text : JSON.stringify(text);
+  s = s.replace(/\s+/g, " ").trim();
+  if (s.length > max) s = s.slice(0, max - 1) + "…";
+  return s;
+}
+
+function ensureActiveCardForTool() {
+  if (!activeAgentCard) {
+    activeAgentCard = createAgentCard(activeAgent);
+  }
+  return activeAgentCard;
 }
 
 function appendToolCall(callId, name, args) {
-  let li = toolCallIndex.get(callId);
-  if (!li) {
-    li = document.createElement("li");
-    li.className = "in_progress";
-    li.innerHTML = `<span class="tool-name"></span><span class="tool-args"></span><span class="tool-result"></span>`;
-    toolsEl.appendChild(li);
-    toolCallIndex.set(callId, li);
+  let entry = toolCallIndex.get(callId);
+  if (!entry) {
+    const card = ensureActiveCardForTool();
+    const ul = card.querySelector(".tool-rows");
+    const empty = ul.querySelector(".empty");
+    if (empty) empty.remove();
+    const row = document.createElement("details");
+    row.className = "tool-row status-yellow";
+    row.innerHTML = `
+      <summary>
+        <span class="status-dot"></span>
+        <span class="tool-name"></span>
+        <span class="tool-summary">running…</span>
+        <span class="row-caret">▸</span>
+      </summary>
+      <div class="tool-detail">
+        <span class="label">arguments</span>
+        <pre class="tool-args"></pre>
+        <span class="label result-label" hidden>result</span>
+        <pre class="tool-result" hidden></pre>
+      </div>`;
+    row.querySelector(".tool-name").textContent = name || "(tool)";
+    ul.appendChild(row);
+    entry = { rowEl: row, cardEl: card, toolName: name || "(tool)", status: "in_progress" };
+    toolCallIndex.set(callId, entry);
+    updateCardCount(card);
+    setCardStatus(card, "yellow");
   }
-  li.querySelector(".tool-name").textContent = name || "(tool)";
-  if (args !== undefined) li.querySelector(".tool-args").textContent = typeof args === "string" ? args : JSON.stringify(args);
-  toolsEl.scrollTop = toolsEl.scrollHeight;
-  return li;
+  if (args !== undefined) {
+    const argsStr = typeof args === "string" ? args : JSON.stringify(args, null, 2);
+    entry.rowEl.querySelector(".tool-args").textContent = argsStr;
+  }
+  if (name && entry.toolName !== name) {
+    entry.toolName = name;
+    entry.rowEl.querySelector(".tool-name").textContent = name;
+  }
+  return entry.rowEl;
 }
 
 function completeToolCall(callId, result, ok = true) {
-  const li = toolCallIndex.get(callId);
-  if (!li) return;
-  li.classList.remove("in_progress");
-  li.classList.add(ok ? "done" : "error");
-  if (result !== undefined) li.querySelector(".tool-result").textContent = "→ " + (typeof result === "string" ? result : JSON.stringify(result, null, 2));
-  if (typeof result === "string" && /terraform|Plan:|Apply complete|tf-/.test(result)) {
-    tfLogEl.textContent += (tfLogEl.textContent ? "\n" : "") + result;
-    tfLogEl.scrollTop = tfLogEl.scrollHeight;
+  const entry = toolCallIndex.get(callId);
+  if (!entry) return;
+  const row = entry.rowEl;
+  row.classList.remove("status-yellow");
+  row.classList.add(ok ? "status-green" : "status-red");
+  entry.status = ok ? "done" : "error";
+  if (result !== undefined) {
+    const resStr = typeof result === "string" ? result : JSON.stringify(result, null, 2);
+    const resEl = row.querySelector(".tool-result");
+    const resLabel = row.querySelector(".result-label");
+    resEl.textContent = resStr;
+    resEl.hidden = false;
+    resLabel.hidden = false;
+    row.querySelector(".tool-summary").textContent = (ok ? "ok · " : "error · ") + shortSummary(resStr);
+  } else {
+    row.querySelector(".tool-summary").textContent = ok ? "ok" : "error";
   }
+  rollupCardStatus(entry.cardEl);
 }
+
+function updateCardCount(card) {
+  if (!card) return;
+  const rows = card.querySelectorAll(".tool-row");
+  const cnt = rows.length;
+  const el = card.querySelector(".agent-tool-count");
+  if (el) el.textContent = cnt === 1 ? "1 tool" : `${cnt} tools`;
+}
+
+// ---------- SSE event handler ----------
 
 let assistantBubble = null;
 
@@ -196,16 +358,17 @@ function handleEvent(eventType, data) {
   console.log("[sse]", eventType, data);
   switch (eventType) {
     case "response.created":
-      assistantBubble = appendBubble("assistant", "");
+      // Don't create a real bubble yet — keep the thinking indicator
+      // until the first text delta arrives. (If the model emits only
+      // tool calls, the thinking bubble stays through the tool-call
+      // phase, which is the desired behavior.)
       currentAssistantText = "";
       break;
     case "response.output_text.delta": {
       const delta = data.delta || data.text || "";
+      hideThinking();
       if (!assistantBubble) assistantBubble = appendBubble("assistant", "");
       currentAssistantText += delta;
-      // Render the running text as markdown on each delta. marked tolerates
-      // partial/unclosed syntax (e.g. an open ** will just render literally
-      // until the closer arrives, then re-renders as bold on the next delta).
       assistantBubble.innerHTML = renderMarkdown(currentAssistantText);
       assistantBubble.classList.add("md");
       messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -214,14 +377,15 @@ function handleEvent(eventType, data) {
     case "response.output_item.added": {
       const item = data.item || {};
       if (item.type === "function_call") {
+        showThinking(`${shortAgentLabel(activeAgent)} is calling ${item.name}\u2026`);
         appendToolCall(item.call_id || item.id, item.name, item.arguments);
       }
       break;
     }
     case "response.function_call_arguments.delta": {
-      const li = toolCallIndex.get(data.call_id || data.item_id);
-      if (li) {
-        const argsEl = li.querySelector(".tool-args");
+      const entry = toolCallIndex.get(data.call_id || data.item_id);
+      if (entry) {
+        const argsEl = entry.rowEl.querySelector(".tool-args");
         argsEl.textContent = (argsEl.textContent || "") + (data.delta || "");
       }
       break;
@@ -232,14 +396,12 @@ function handleEvent(eventType, data) {
         appendToolCall(item.call_id || item.id, item.name, item.arguments);
       } else if (item.type === "function_call_output") {
         completeToolCall(item.call_id, item.output, true);
+        // Tool finished; model is about to think again about next step.
+        showThinking(`${shortAgentLabel(activeAgent)} is thinking\u2026`);
       }
       break;
     }
     case "routing": {
-      // The active agent emitted a routing marker. Capture it; the actual
-      // switch + replay/handback happens on `done` so the current stream
-      // can finish flushing first (e.g. the trailing "Handing you over"
-      // sentence).
       const direction = data?.direction || "forward";
       if (direction === "forward") {
         const target = data?.target;
@@ -249,12 +411,8 @@ function handleEvent(eventType, data) {
           break;
         }
         pendingForward = { target, targetAgent, summary: data?.summary || "" };
-        showForwardBanner(target);
       } else if (direction === "back") {
-        // Resolve the caller from our stack (peek; pop happens on `done`).
-        const caller = callerStack.length ? callerStack[callerStack.length - 1] : ORCHESTRATOR;
         pendingHandback = { summary: data?.summary || "" };
-        showHandbackBanner(caller);
       }
       break;
     }
@@ -263,15 +421,9 @@ function handleEvent(eventType, data) {
       break;
     case "response.completed":
     case "response.done":
-      // Persist the assistant's reply (sans markers — backend already
-      // stripped them) into the CURRENTLY active agent's history. This is
-      // the agent that produced the reply; the swap (if any) hasn't
-      // happened yet.
       if (currentAssistantText) {
         getHistory(activeAgent).push({ role: "assistant", content: currentAssistantText });
       }
-      // Re-render the assistant bubble as markdown HTML now that the full
-      // text is known (avoids partial-syntax issues during streaming).
       if (assistantBubble && currentAssistantText) {
         assistantBubble.innerHTML = renderMarkdown(currentAssistantText);
         assistantBubble.classList.add("md");
@@ -281,10 +433,12 @@ function handleEvent(eventType, data) {
       currentAssistantText = "";
       break;
     case "error":
-      appendBubble("system", "Error: " + (data.message || JSON.stringify(data)));
+      hideThinking();
+      appendBubble("error", "Error: " + (data.message || JSON.stringify(data)));
+      if (activeAgentCard) setCardStatus(activeAgentCard, "red");
       break;
     case "done":
-      // Safety net: if no response.completed/done fired, render markdown now.
+      // Safety net: render markdown if not already done.
       if (assistantBubble && currentAssistantText) {
         getHistory(activeAgent).push({ role: "assistant", content: currentAssistantText });
         assistantBubble.innerHTML = renderMarkdown(currentAssistantText);
@@ -295,19 +449,15 @@ function handleEvent(eventType, data) {
       if (pendingForward) {
         const { target, targetAgent, summary } = pendingForward;
         pendingForward = null;
-        // Push current onto caller stack, switch to target.
         callerStack.push(activeAgent);
         const callerAgent = activeAgent;
         setActiveAgent(targetAgent);
-        // Pricing always starts fresh — every cost question is self-contained.
         if (target === "pricing") {
           conversations.set(targetAgent, []);
         }
-        // Seed message: when caller provided a summary (specialist ->
-        // pricing), the summary IS the prompt. Otherwise replay the
-        // user's last message (orchestrator -> specialist).
         const seed = summary ? summary : lastUserMessageForTurn;
-        appendBubble("system", `→ Handed off from ${callerAgent} to ${targetAgent}${summary ? `: ${summary}` : ""}.`);
+        hideThinking();
+        appendDivider(`handed off to ${targetAgent}`);
         sendToActiveAgent(seed, /*alreadyShown=*/true);
       } else if (pendingHandback) {
         const { summary } = pendingHandback;
@@ -316,21 +466,15 @@ function handleEvent(eventType, data) {
         const callerAgent = callerStack.pop() || ORCHESTRATOR;
         console.log("[handback] popping stack: from=%s -> caller=%s, summary=%s", fromAgent, callerAgent, summary);
         setActiveAgent(callerAgent);
-        appendBubble(
-          "system",
-          `↩ Returned from ${fromAgent} to ${callerAgent}${summary ? ` — ${summary}` : ""}.`
-        );
-        // Auto-trigger the caller so it greets/summarises/routes without
-        // waiting for the user to type. Sent as a user-role turn (the
-        // caller's prompt teaches it to recognise "[handback from X: Y]"
-        // as a control message rather than user speech).
+        hideThinking();
+        appendDivider(`returned to ${callerAgent}`);
         const trigger = `[handback from ${fromAgent}: ${summary || "(no summary provided)"}]`;
         console.log("[handback] auto-triggering caller with:", trigger);
-        // Schedule via setTimeout so it runs AFTER the current reader-loop
-        // iteration completes — avoids re-entering handleEvent while the
-        // outer reader is still inside its read cycle.
         setTimeout(() => sendToActiveAgent(trigger, /*alreadyShown=*/true), 0);
       } else {
+        // Turn complete with no routing — mark active card green if no error.
+        if (activeAgentCard) rollupCardStatus(activeAgentCard);
+        hideThinking();
         sendBtn.disabled = false;
         input.disabled = false;
         input.focus();
@@ -339,19 +483,20 @@ function handleEvent(eventType, data) {
   }
 }
 
+// ---------- Send ----------
+
 async function sendToActiveAgent(text, alreadyShown = false) {
   if (!alreadyShown) {
     appendBubble("user", text);
   }
-  // Append to active agent's history.
   getHistory(activeAgent).push({ role: "user", content: text });
   sendBtn.disabled = true;
   input.disabled = true;
   if (!alreadyShown) input.value = "";
   lastUserMessageForTurn = text;
 
-  // History sent to backend = everything except the current user turn
-  // (server appends the user message itself).
+  showThinking();
+
   const history = getHistory(activeAgent).slice(0, -1);
 
   const resp = await fetch("/chat", {
@@ -360,7 +505,8 @@ async function sendToActiveAgent(text, alreadyShown = false) {
     body: JSON.stringify({ message: text, history, agent: activeAgent }),
   });
   if (!resp.ok || !resp.body) {
-    appendBubble("system", "Network error: " + resp.status);
+    hideThinking();
+    appendBubble("error", "Network error: " + resp.status);
     sendBtn.disabled = false; input.disabled = false; return;
   }
 
@@ -399,10 +545,9 @@ if (startOverBtn) {
     if (!confirm("Clear all conversations and start a fresh session?")) return;
     conversations = new Map();
     callerStack = [];
-    setActiveAgent(ORCHESTRATOR);
+    activeAgentCard = null;
     messagesEl.innerHTML = "";
-    toolsEl.innerHTML = "";
-    tfLogEl.textContent = "";
+    activityEl.innerHTML = "";
     toolCallIndex.clear();
     countedResponseIds.clear();
     sessionTokens.input = 0;
@@ -412,14 +557,15 @@ if (startOverBtn) {
     tokenInEl.textContent = "0";
     tokenOutEl.textContent = "0";
     tokenTotalEl.textContent = "0";
-    clearBanners();
     pendingForward = null;
     pendingHandback = null;
     lastUserMessageForTurn = null;
     currentAssistantText = "";
     assistantBubble = null;
+    hideThinking();
     sendBtn.disabled = false;
     input.disabled = false;
+    setActiveAgent(ORCHESTRATOR);
     appendBubble("system", `Reset. Connected to ${ORCHESTRATOR}.`);
     input.focus();
   });

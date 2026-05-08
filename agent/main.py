@@ -34,7 +34,7 @@ logger = logging.getLogger("vmagent")
 
 PROJECT_ENDPOINT = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
 MODEL_DEPLOYMENT_NAME = os.environ.get("AZURE_AI_MODEL_DEPLOYMENT_NAME", "gpt-5.1")
-AGENT_NAME = os.environ.get("HOSTED_AGENT_NAME", "vmagent-agent")
+AGENT_NAME = os.environ.get("HOSTED_AGENT_NAME", "vmagent-agent-windows")
 
 # The same container image serves three hosted-agent roles. Foundry rejects
 # env-var names with the reserved ``AGENT_*`` / ``FOUNDRY_*`` prefixes, so we

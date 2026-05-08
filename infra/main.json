@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.42.1.51946",
-      "templateHash": "1750562449175166481"
+      "templateHash": "17406783864714049681"
     }
   },
   "parameters": {
@@ -53,7 +53,7 @@
     },
     "hostedAgentNameWindows": {
       "type": "string",
-      "defaultValue": "[parameters('hostedAgentName')]",
+      "defaultValue": "[format('{0}-windows', parameters('hostedAgentName'))]",
       "metadata": {
         "description": "Hosted Windows VM agent name"
       }
@@ -65,9 +65,16 @@
         "description": "Hosted Linux VM agent name"
       }
     },
+    "hostedAgentNamePricing": {
+      "type": "string",
+      "defaultValue": "[format('{0}-pricing', parameters('hostedAgentName'))]",
+      "metadata": {
+        "description": "Hosted pricing agent name (third agent, same image, different role)."
+      }
+    },
     "frontendVersion": {
       "type": "string",
-      "defaultValue": "0.2.0",
+      "defaultValue": "0.5.1",
       "metadata": {
         "description": "Frontend image version label (shown in footer)"
       }
@@ -586,6 +593,9 @@
           "hostedAgentNameLinux": {
             "value": "[parameters('hostedAgentNameLinux')]"
           },
+          "hostedAgentNamePricing": {
+            "value": "[parameters('hostedAgentNamePricing')]"
+          },
           "frontendVersion": {
             "value": "[parameters('frontendVersion')]"
           }
@@ -597,7 +607,7 @@
             "_generator": {
               "name": "bicep",
               "version": "0.42.1.51946",
-              "templateHash": "2693732532498543386"
+              "templateHash": "8229840654166913422"
             }
           },
           "parameters": {
@@ -672,7 +682,7 @@
             },
             "hostedAgentNameWindows": {
               "type": "string",
-              "defaultValue": "[parameters('hostedAgentName')]",
+              "defaultValue": "[format('{0}-windows', parameters('hostedAgentName'))]",
               "metadata": {
                 "description": "Hosted Windows VM agent name"
               }
@@ -684,9 +694,16 @@
                 "description": "Hosted Linux VM agent name"
               }
             },
+            "hostedAgentNamePricing": {
+              "type": "string",
+              "defaultValue": "[format('{0}-pricing', parameters('hostedAgentName'))]",
+              "metadata": {
+                "description": "Hosted pricing agent name"
+              }
+            },
             "frontendVersion": {
               "type": "string",
-              "defaultValue": "0.2.0",
+              "defaultValue": "0.5.1",
               "metadata": {
                 "description": "Frontend version label (shown in footer)"
               }
@@ -788,6 +805,10 @@
                           "value": "[parameters('hostedAgentNameLinux')]"
                         },
                         {
+                          "name": "HOSTED_AGENT_NAME_PRICING",
+                          "value": "[parameters('hostedAgentNamePricing')]"
+                        },
+                        {
                           "name": "FRONTEND_VERSION",
                           "value": "[parameters('frontendVersion')]"
                         },
@@ -884,6 +905,10 @@
     "HOSTED_AGENT_NAME_LINUX": {
       "type": "string",
       "value": "[parameters('hostedAgentNameLinux')]"
+    },
+    "HOSTED_AGENT_NAME_PRICING": {
+      "type": "string",
+      "value": "[parameters('hostedAgentNamePricing')]"
     },
     "FRONTEND_IDENTITY_PRINCIPAL_ID": {
       "type": "string",

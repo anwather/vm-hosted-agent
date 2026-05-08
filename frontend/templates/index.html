@@ -4,6 +4,17 @@
   <meta charset="utf-8" />
   <title>Task Orchestrator</title>
   <link rel="stylesheet" href="/static/styles.css" />
+  <script>
+    // Apply persisted theme before paint to avoid flash.
+    (function () {
+      try {
+        var t = localStorage.getItem("vmagent-theme") || "dark";
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) {
+        document.documentElement.setAttribute("data-theme", "dark");
+      }
+    })();
+  </script>
 </head>
 <body>
   <header data-orchestrator="{{ orchestrator_agent_name }}"
@@ -13,19 +24,12 @@
     <h1>Task Orchestrator</h1>
     <span class="user">{{ user }}</span>
     <span class="agent" id="active-agent-display">{{ orchestrator_agent_name }}</span>
-    <span class="active-agent" id="handoff-banner" hidden>
-      <span class="active-agent-label">→ routing to</span>
-      <span id="handoff-target"></span>
-    </span>
-    <span class="active-agent" id="handback-banner" hidden>
-      <span class="active-agent-label">↩ returning to</span>
-      <span id="handback-target"></span>
-    </span>
-    <span class="tokens" id="token-counter" title="Total tokens used this session (input + output). A trailing ~ means the count is a client-side estimate (Foundry didn't report usage).">
+    <span class="tokens" id="token-counter" title="Total tokens used this session (input + output). A trailing ~ means the count is a client-side estimate.">
       tokens: <span id="token-total">0</span>
       <span class="token-detail">(in <span id="token-in">0</span> / out <span id="token-out">0</span>)</span>
     </span>
-    <button type="button" id="start-over" class="start-over" title="Clear all conversation history and start a fresh session.">Start over</button>
+    <button type="button" id="theme-toggle" class="header-btn theme-toggle" title="Toggle light / dark theme" aria-label="Toggle theme">🌙</button>
+    <button type="button" id="start-over" class="header-btn start-over" title="Clear all conversation history and start a fresh session.">Start over</button>
   </header>
 
   <main>
@@ -39,14 +43,9 @@
       </form>
     </section>
 
-    <aside id="tools-pane">
-      <h2>Tool calls</h2>
-      <ol id="tools-list"></ol>
-    </aside>
-
-    <aside id="log-pane">
-      <h2>Terraform log</h2>
-      <pre id="tf-log"></pre>
+    <aside id="activity-pane">
+      <h2>Agent activity</h2>
+      <ol id="activity"></ol>
     </aside>
   </main>
 

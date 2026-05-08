@@ -43,7 +43,8 @@ ORCHESTRATOR_AGENT_NAME = os.environ.get(
     "ORCHESTRATOR_AGENT_NAME", "taskorch-orchestrator"
 )
 HOSTED_AGENT_NAME_WINDOWS = os.environ.get(
-    "HOSTED_AGENT_NAME_WINDOWS", "vmagent-agent"
+    "HOSTED_AGENT_NAME_WINDOWS",
+    os.environ.get("HOSTED_AGENT_NAME", "vmagent-agent-windows"),
 )
 HOSTED_AGENT_NAME_LINUX = os.environ.get(
     "HOSTED_AGENT_NAME_LINUX", "vmagent-agent-linux"
@@ -99,7 +100,7 @@ typed. Examples:
 
     [handback from vmagent-agent-pricing: Estimated Standard_D2s_v5 Linux in australiaeast at A$95.42/mo. User wants to proceed with Linux build.]
     [handback from vmagent-agent-linux: User changed mind, wants Windows now. Collected vm_name=foo so far.]
-    [handback from vmagent-agent: Windows VM foo deployed in rg multi-agent-demo. KV secret URI <uri>.]
+    [handback from vmagent-agent-windows: Windows VM foo deployed in rg multi-agent-demo. KV secret URI <uri>.]
     [handback from vmagent-agent-pricing: User abandoned pricing flow without quote.]
 
 Rules for handback messages:

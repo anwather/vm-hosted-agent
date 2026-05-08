@@ -8,6 +8,10 @@ A Microsoft Foundry **multi-agent orchestration** demo:
   parameters and runs Terraform.
 * **Linux VM agent** (Foundry hosted agent, **same container image**, different
   env vars + system prompt + template subfolder) — same flow for Linux.
+* **Pricing agent** (Foundry hosted agent, **same container image**, role
+  `pricing`) — answers "how much will this VM cost?" by hitting the Azure
+  retail-prices API. Either VM specialist may forward to pricing mid-build
+  for an estimate; pricing always hands back to its caller.
 * **Frontend** (FastAPI + HTMX, Container App, Easy Auth) — single chat
   surface; transparently re-targets the SSE stream when the orchestrator emits
   a routing marker.
@@ -37,7 +41,7 @@ Frontend SSE proxy
    │   emits a `routing` event → swaps active agent → resets thread →
    │   replays user's original message to the chosen specialist.
    │
-   ├──►  vmagent-agent          (hosted, role=vm-builder, OS=windows, tpl=windows/)
+   ├──►  vmagent-agent-windows  (hosted, role=vm-builder, OS=windows, tpl=windows/)
    ├──►  vmagent-agent-linux    (hosted, **same image**,  role=vm-builder, OS=linux, tpl=linux/)
    └──►  vmagent-agent-pricing  (hosted, **same image**,  role=pricing — VM monthly cost in AUD)
 
@@ -60,10 +64,10 @@ are rejected. We use VM_OS_FAMILY (instead of AGENT_OS) and VM_AGENT_ROLE
 | `agent/` | Hosted-agent container. `azure-ai-agentserver-responses`, terraform binary, git. OS-parameterized via env vars. |
 | `frontend/` | FastAPI + HTMX chat. Multi-agent dispatcher with marker-based handoff. |
 | `infra/` | Bicep: ACR, Key Vault, tfstate Storage (AAD-auth), Container Apps env + frontend app, UAMI. |
-| `deploy/deploy_agent.py` | Deploys ONE hosted agent (`--target windows` or `--target linux`). |
+| `deploy/deploy_agent.py` | Deploys ONE hosted agent (`--target windows`, `--target linux`, or `--target pricing`). |
 | `deploy/deploy_orchestrator.py` | Deploys/updates the persistent orchestrator agent. |
 | `deploy/assign_rbac.py` | Assigns the post-deploy RBAC roles to a hosted agent's per-version managed identity. |
-| `deploy/deploy_all.py` | One-shot: builds image, deploys both hosted agents + orchestrator, runs RBAC. |
+| `deploy/deploy_all.py` | One-shot: deploys all 3 hosted agents (windows, linux, pricing) + orchestrator and runs RBAC. |
 
 External: VM templates live at <https://github.com/anwather/vm-template-repo>
 with subfolders `windows/` and `linux/`.
@@ -79,6 +83,15 @@ with subfolders `windows/` and `linux/`.
   principal with Contributor on the Foundry resource group as well.
 * One **resource group** for the demo infra (this README uses
   `multi-agent-demo`). All Bicep resources land here.
+
+### VM template repo (public)
+
+The hosted agent clones VM templates at runtime from
+<https://github.com/anwather/vm-template-repo> with no credentials. The
+repo must remain **public** (or you must fork it and either keep the fork
+public or extend `agent/tools/git_clone.py` to inject a PAT). Subfolders
+`windows/` and `linux/` are the entry points; the `TEMPLATE_REPO_URL` and
+`TEMPLATE_SUBFOLDER` env vars on each hosted agent point at them.
 
 ### Azure tenant / Entra ID requirements
 
@@ -98,14 +111,19 @@ with subfolders `windows/` and `linux/`.
 * A **Foundry account + project** (the demo uses region `australiaeast`).
   Any region is supported as long as the model below is available there.
 * Model deployment **`gpt-5.1`** in that project (deployment name *exactly*
-  `gpt-5.1`; rename in the prompt files if you use a different name).
+  `gpt-5.1`; rename in the prompt files if you use a different name). All
+  four agents (orchestrator + windows + linux + pricing) share the single
+  deployment.
 * A **capability host** must exist on the Foundry CognitiveServices account
   before hosted agents can be created. Provision it via the Foundry portal
   (**Project → Settings → Capability hosts → Add → "HostedAgents-V1Preview"**)
   or with the `azureaifoundry` CLI extension. Without this, the first
   `deploy_agent.py` call returns `400: capability host not found`.
 * The Foundry account must allow outbound to ACR (default allow-all is fine)
-  so it can pull the agent image.
+  so it can pull the agent image. The ACR is created by the Bicep with
+  anonymous-pull **disabled**; the Foundry hosted-agent runtime authenticates
+  to ACR with its system-assigned identity, so RBAC via `rbac-acrpull.bicep`
+  is required (already wired in `infra/main.bicep`).
 
 ### Tooling on the deployer machine
 
@@ -125,10 +143,52 @@ with subfolders `windows/` and `linux/`.
 * Shared-key access on Storage is **disabled** (`allowSharedKeyAccess: false`);
   the Terraform backend uses AAD auth via the agent's MI.
 
-## Quickstart (clean RG, end-to-end)
+## Quickstart with `azd` (recommended)
+
+If you have the [Azure Developer CLI](https://aka.ms/azd) installed, the
+whole stack can be stood up with three commands. Hooks (`infra/hooks/`)
+build the agent image, deploy the orchestrator + 3 hosted agents into
+Foundry, and reassign per-version managed-identity RBAC.
+
+```powershell
+azd auth login
+azd init                                # only on first clone — pick env name + region
+azd env set FOUNDRY_PROJECT_ENDPOINT  "https://<acct>.services.ai.azure.com/api/projects/<proj>"
+azd env set FOUNDRY_RG                "<foundry-rg>"
+# Optional overrides:
+# azd env set AGENT_IMAGE_TAG       latest         # default: latest
+# azd env set VM_TARGET_SUBSCRIPTION_ID <sub-id>   # default: AZURE_SUBSCRIPTION_ID
+azd up                                  # provision infra, build agent image, deploy agents, deploy frontend
+```
+
+`azd up` will:
+1. Run `preprovision` to validate `FOUNDRY_PROJECT_ENDPOINT` + `FOUNDRY_RG`
+   and derive `FOUNDRY_ACCOUNT_NAME` / `FOUNDRY_PROJECT_NAME` into the
+   azd env.
+2. Provision infra (`infra/main.bicep`).
+3. Run `postprovision` to:
+   * `az acr build` the agent image into the new ACR
+   * `python deploy/deploy_all.py` to (re)create the orchestrator + windows
+     + linux + pricing hosted agents and assign RBAC to each new MI
+4. Build & deploy the frontend container app image (`services.frontend`).
+
+Easy Auth (Entra) is **not** automated — see the manual step below; you
+only need to do this once per environment.
+
+To re-deploy just the agent code:
+```powershell
+azd provision        # re-runs postprovision (rebuilds image, new agent versions)
+```
+
+To re-deploy just the frontend:
+```powershell
+azd deploy frontend
+```
+
+## Quickstart (manual, without azd)
 
 Replace placeholders (`<...>`) with your values. Image versions shown
-(`0.4.3`) match the current main branch — bump as you publish new tags.
+(`0.5.1`) match the current main branch — bump as you publish new tags.
 
 ```powershell
 # 0) One-time: install deploy-script dependencies
@@ -155,13 +215,13 @@ $FQDN  = $out.FRONTEND_FQDN.value
 #    az acr build streaming logs can crash on Windows with a cp1252
 #    UnicodeEncodeError — pass --no-logs and force UTF-8 console encoding.
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-az acr build --registry $ACR --image vmagent-agent:0.4.3    --file agent/Dockerfile    agent    --no-logs
-az acr build --registry $ACR --image vmagent-frontend:0.4.3 --file frontend/Dockerfile frontend --no-logs
-#  (Convenience wrapper for the agent image: .\deploy\build_and_push.ps1 -Registry $ACR -Tag 0.4.3)
+az acr build --registry $ACR --image vmagent-agent:0.5.1    --file agent/Dockerfile    agent    --no-logs
+az acr build --registry $ACR --image vmagent-frontend:0.5.1 --file frontend/Dockerfile frontend --no-logs
+#  (Convenience wrapper for the agent image: .\deploy\build_and_push.ps1 -Registry $ACR -Tag 0.5.1)
 
 # 3) Deploy orchestrator + 3 hosted agents + RBAC in one shot
 $env:FOUNDRY_PROJECT_ENDPOINT      = "https://<FOUNDRY_ACCT>.services.ai.azure.com/api/projects/<PROJECT>"
-$env:CONTAINER_IMAGE               = "$ACR.azurecr.io/vmagent-agent:0.4.3"
+$env:CONTAINER_IMAGE               = "$ACR.azurecr.io/vmagent-agent:0.5.1"
 $env:TFSTATE_STORAGE_ACCOUNT_NAME  = $STG
 $env:TFSTATE_RESOURCE_GROUP        = "multi-agent-demo"
 $env:KEYVAULT_URI                  = $KVURI
@@ -176,10 +236,10 @@ python deploy/deploy_all.py
 
 # 4) Update the frontend container app with the new image + version label
 az containerapp update -n vmagent-frontend -g multi-agent-demo `
-  --image "$ACR.azurecr.io/vmagent-frontend:0.4.3" `
-  --set-env-vars FRONTEND_VERSION=0.4.3 `
+  --image "$ACR.azurecr.io/vmagent-frontend:0.5.1" `
+  --set-env-vars FRONTEND_VERSION=0.5.1 `
                  ORCHESTRATOR_AGENT_NAME=taskorch-orchestrator `
-                 HOSTED_AGENT_NAME_WINDOWS=vmagent-agent `
+                 HOSTED_AGENT_NAME_WINDOWS=vmagent-agent-windows `
                  HOSTED_AGENT_NAME_LINUX=vmagent-agent-linux `
                  HOSTED_AGENT_NAME_PRICING=vmagent-agent-pricing
 
@@ -204,8 +264,8 @@ system bubble, then the specialist starts asking VM parameter questions.
 After editing the agent code or prompts:
 
 ```powershell
-.\deploy\build_and_push.ps1 -Registry $ACR -Tag 0.4.4   # publish a new tag
-$env:CONTAINER_IMAGE = "$ACR.azurecr.io/vmagent-agent:0.4.4"
+.\deploy\build_and_push.ps1 -Registry $ACR -Tag 0.5.1   # publish a new tag
+$env:CONTAINER_IMAGE = "$ACR.azurecr.io/vmagent-agent:0.5.1"
 python deploy/deploy_all.py                              # new versions of all 3 hosted agents + RBAC
 ```
 
@@ -275,6 +335,21 @@ is trivial. The tool returns `{ monthly_aud, hourly_aud, source }` for
 `get_vm_monthly_cost(vm_size, region, os_type)`, computing
 `monthly = hourly × 730`. **Compute-only** — disk, bandwidth, backups not
 included.
+
+#### Azure region validation
+
+All three agents share `validate_azure_region(region)` and
+`list_azure_vm_regions()` (in `agent/tools/regions.py`). They source the
+authoritative VM-region list from the same auth-free Azure Retail Prices
+API used by the pricing tool — one probe SKU (`Standard_B2s`) is sold in
+every public region, so its `armRegionName` set is the canonical list.
+The list is cached in-process for 6 hours. On a miss the tool returns
+`difflib`-based suggestions plus a hint about the expected short-code
+format (e.g. `australiaeast`, `newzealandnorth`, `eastus`). The Windows /
+Linux / Pricing prompts all instruct the agent to call
+`validate_azure_region` BEFORE any region-consuming tool
+(`set_tf_variables`, `get_vm_monthly_cost`) and never to assume that
+their training data has the latest region list.
 
 #### Agent role wiring
 
@@ -369,6 +444,29 @@ Run for **every** new hosted-agent version's `principal_id`:
   `usage` payload (some hosted-agent variants don't). The token counter
   prefers reported usage when present and falls back to `tiktoken` otherwise.
 
+#### UI layout (frontend ≥ 0.5.0)
+
+The page is a 2-pane grid:
+
+* **Left — chat.** User and assistant bubbles. Routing/handback transitions
+  appear as subtle inline dividers (`─── handed off to vmagent-agent-windows ───`)
+  rather than verbose system bubbles.
+* **Right — Agent activity.** A timeline of cards, one per agent
+  engagement. Each card has a traffic-light dot:
+  * 🟡 yellow — agent is starting / streaming / has a tool in flight
+  * 🟢 green  — agent finished its turn cleanly
+  * 🔴 red    — at least one tool errored
+  Past cards auto-collapse when a new agent becomes active; click any
+  header to re-expand. Tool calls render as collapsed `<details>` rows
+  inside the active card (`status_dot · tool_name · short result`); click
+  a row to reveal full arguments and result. Terraform output lives inside
+  the relevant tool row — there is no longer a separate Terraform log
+  pane.
+
+A **theme toggle** (🌙 / ☀️) in the header switches between dark
+(default) and light. The choice is persisted in `localStorage` and
+applied before paint to avoid a flash.
+
 ### Easy Auth pitfall
 
 When the redirect URI on the Entra app registration doesn't exactly match
@@ -411,6 +509,8 @@ agent/                     OS-parameterized hosted-agent container
     terraform.py           init→plan→apply with state-key derivation; workspace_status() inspector
     workspace.py           Workspace path resolution per subfolder
     keyvault.py            Random admin password to KV
+    regions.py             validate_azure_region() / list_azure_vm_regions() — auth-free,
+                           sourced from the Azure Retail Prices API; cached for 6h.
     registry.py            Tool registration; ALL_TOOLS for vm-builder, PRICING_TOOLS for pricing
 
 frontend/                  FastAPI + HTMX, multi-agent dispatcher
@@ -460,3 +560,42 @@ infra/                     Bicep
   1. edit `agent/system_prompt_*.txt`
   2. `.\deploy\build_and_push.ps1 -Tag <new>`
   3. `$env:CONTAINER_IMAGE="...:<new>"; python deploy/deploy_all.py`
+
+## Tear-down & clean rebuild
+
+To wipe everything and rebuild from a fresh state (useful before a customer
+demo). The Bicep does **not** own the Foundry CognitiveServices account
+(you bring your own), so the Foundry project survives all teardown
+commands below — the four hosted/persistent agents inside it must be
+deleted explicitly.
+
+```powershell
+# A) If you used azd:
+azd down --purge --force          # deletes the demo RG; purges KV/ACR soft-delete
+
+# B) If you deployed manually:
+az group delete -n multi-agent-demo --yes
+# Key Vault has soft-delete enabled; purge it so the next deploy can reuse the name:
+az keyvault purge --name <KV_NAME> --location australiaeast 2>$null
+
+# Neither of the above deletes:
+#   * the Foundry hosted/persistent agents (the Foundry account is BYO)
+#   * the Entra app registration (Easy Auth)
+#   * any VMs the agent created in your target subscription
+
+# Delete the four agents from the Foundry project. Easiest path:
+#   Foundry portal → Project → Agents → select each (taskorch-orchestrator,
+#   vmagent-agent-windows, vmagent-agent-linux, vmagent-agent-pricing) → Delete.
+
+# Delete the Entra app:
+az ad app delete --id (az ad app list --display-name "Task Orchestrator" --query "[0].appId" -o tsv)
+
+# C) Clean any test VMs the agent built (they live in the TARGET subscription,
+#    NOT in multi-agent-demo). The agent uses RG names like 'demo-vm-<name>'.
+az group list --query "[?starts_with(name,'demo-vm-')].name" -o tsv |
+  ForEach-Object { az group delete -n $_ --yes --no-wait }
+```
+
+Then re-deploy with either `azd up` or the manual quickstart above. KV /
+ACR / Storage names are suffixed with `uniqueString(resourceGroup().id)`,
+so a fresh RG always gets fresh resource names.

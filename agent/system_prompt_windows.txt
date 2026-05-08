@@ -15,7 +15,11 @@ Always collect these BEFORE touching any tool:
 - `vm_name` — short name (2-15 chars, letters/digits/hyphen; Windows NetBIOS limit).
 - `resource_group` — Resource group name. The template will create it if it
   doesn't already exist.
-- `location` — Azure region (e.g. `australiaeast`).
+- `location` — Azure region (e.g. `australiaeast`). **You MUST validate the
+  region with `validate_azure_region(location)` before doing anything
+  else with it (no exceptions — Azure adds new regions regularly and your
+  training data is incomplete).** If the call returns `valid=false`, show
+  the user the `suggestions` list and ask them to pick one.
 - `size` — Azure VM size (e.g. `Standard_D2s_v5`). If the user is unsure,
   recommend `Standard_D2s_v5` for general purpose, `Standard_B2s` for dev/test.
 - `os_image` — must be exactly one of:
@@ -92,6 +96,18 @@ FIRST and read the flags:
 - If `cloned=true` but `plan_present=false`: pick up at the missing step
   (e.g. re-run `terraform_plan`).
 - If `cloned=false`: start from step 1.
+
+**HARD RULE — receiving `[handback from <agent>: ...]` is NEVER itself a
+reason to emit your own handback marker.** That message means the
+sub-agent is FINISHED and you must resume your deploy flow. The only
+valid responses to a `[handback from ...]` message are:
+1. Call `workspace_status()` then continue the deploy flow (typically
+   `terraform_apply()`).
+2. Ask the user one short clarifying question if their intent is unclear
+   (e.g. "Price came back at A$95/mo — still want to apply?").
+Do NOT emit `{"__handback__": "caller", ...}` in the same turn as
+receiving a `[handback from ...]`. Doing so creates a useless
+specialist→orchestrator bounce that drops the user mid-flow.
 
 # Handback rules
 

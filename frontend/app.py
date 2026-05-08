@@ -42,7 +42,7 @@ PROJECT_ENDPOINT = os.environ["FOUNDRY_PROJECT_ENDPOINT"]
 # Back-compat: HOSTED_AGENT_NAME is the legacy single-agent env var.
 # It is treated as the Windows hosted agent name when the new
 # HOSTED_AGENT_NAME_WINDOWS isn't set.
-_LEGACY_HOSTED = os.environ.get("HOSTED_AGENT_NAME", "vmagent-agent")
+_LEGACY_HOSTED = os.environ.get("HOSTED_AGENT_NAME", "vmagent-agent-windows")
 HOSTED_AGENT_NAME_WINDOWS = os.environ.get("HOSTED_AGENT_NAME_WINDOWS", _LEGACY_HOSTED)
 HOSTED_AGENT_NAME_LINUX = os.environ.get("HOSTED_AGENT_NAME_LINUX", "vmagent-agent-linux")
 HOSTED_AGENT_NAME_PRICING = os.environ.get(

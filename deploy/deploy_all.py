@@ -11,7 +11,7 @@ like — each run just creates a new agent version.
 Required env vars (all readable from infra outputs except the Foundry endpoint):
 
     FOUNDRY_PROJECT_ENDPOINT    https://<acct>.services.ai.azure.com/api/projects/<proj>
-    CONTAINER_IMAGE             <acr>.azurecr.io/vmagent-agent:<tag>
+    CONTAINER_IMAGE             <acr>.azurecr.io/vmagent-agent-windows:<tag>
     TFSTATE_STORAGE_ACCOUNT_NAME
     TFSTATE_RESOURCE_GROUP
     KEYVAULT_URI
@@ -22,8 +22,11 @@ Required env vars (all readable from infra outputs except the Foundry endpoint):
 
 Optional:
     AZURE_AI_MODEL_DEPLOYMENT_NAME (default: gpt-5.1)
-    HOSTED_AGENT_NAME              (default: vmagent-agent)
+    HOSTED_AGENT_NAME_WINDOWS      (default: vmagent-agent-windows;
+                                    HOSTED_AGENT_NAME is also accepted
+                                    for back-compat)
     HOSTED_AGENT_NAME_LINUX        (default: vmagent-agent-linux)
+    HOSTED_AGENT_NAME_PRICING      (default: vmagent-agent-pricing)
     ORCHESTRATOR_AGENT_NAME        (default: taskorch-orchestrator)
     KEYVAULT_NAME                  (derived from KEYVAULT_URI if not set)
 
@@ -143,7 +146,7 @@ def main() -> int:
     print("\n=== deploy_all complete ===")
     print("Now (re)deploy the frontend container app with the new env vars:")
     print("  ORCHESTRATOR_AGENT_NAME=taskorch-orchestrator")
-    print("  HOSTED_AGENT_NAME_WINDOWS=vmagent-agent")
+    print("  HOSTED_AGENT_NAME_WINDOWS=vmagent-agent-windows")
     print("  HOSTED_AGENT_NAME_LINUX=vmagent-agent-linux")
     print("  HOSTED_AGENT_NAME_PRICING=vmagent-agent-pricing")
     return 0

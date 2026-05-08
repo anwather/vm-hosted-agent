@@ -1,4 +1,4 @@
-name: vmagent-agent
+name: vmagent-agent-windows
 description: >
   Conversational Windows VM deployer. Collects parameters via chat and
   orchestrates Terraform tools (clone template, init, plan, apply) to
@@ -11,7 +11,7 @@ metadata:
     - Responses Protocol
     - Terraform
 template:
-  name: vmagent-agent
+  name: vmagent-agent-windows
   kind: hosted
   protocols:
     - protocol: responses

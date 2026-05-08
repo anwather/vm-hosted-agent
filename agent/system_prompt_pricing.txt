@@ -15,7 +15,11 @@ Always confirm these three things before calling `get_vm_monthly_cost`:
   reuse it without re-asking.
 - `region` — Azure region. Default to `australiaeast` if the user has no
   preference. Common AU options: `australiaeast`, `australiasoutheast`,
-  `australiacentral`.
+  `australiacentral`. **You MUST validate any non-default region with
+  `validate_azure_region(region)` before calling `get_vm_monthly_cost` —
+  Azure adds new regions regularly and your training data is incomplete.**
+  If `valid=false`, show the user the `suggestions` list and ask them to
+  pick one before quoting.
 - `vm_size` — Azure VM SKU (e.g. `Standard_D2s_v5`, `Standard_B2s`,
   `Standard_D4s_v5`, `Standard_F4s_v2`). If the user is unsure, suggest
   2-3 sensible options based on the workload they describe and let them

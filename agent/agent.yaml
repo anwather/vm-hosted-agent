@@ -1,5 +1,5 @@
 kind: hosted
-name: vmagent-agent
+name: vmagent-agent-windows
 protocols:
   - protocol: responses
     version: 1.0.0

@@ -21,6 +21,10 @@ from pydantic import Field
 from .git_clone import clone_template_repo as _clone
 from .password import generate_admin_password as _gen_pw
 from .pricing import get_vm_monthly_cost as _get_vm_monthly_cost
+from .regions import (
+    list_azure_vm_regions as _list_regions,
+    validate_region as _validate_region,
+)
 from .terraform import (
     _allowed_os_images,
     get_deployment_status as _get_status,
@@ -170,9 +174,36 @@ def workspace_status() -> dict[str, Any]:
     return _ws_status(_sid())
 
 
+@tool(approval_mode="never_require")
+def validate_azure_region(
+    region: Annotated[str, Field(description="Azure region short code to validate, e.g. 'australiaeast', 'newzealandnorth', 'eastus'.")],
+) -> dict[str, Any]:
+    """Validate that a region code is a real Azure region that sells VMs.
+
+    ALWAYS call this before set_tf_variables / get_vm_monthly_cost when
+    the user supplies (or you propose) a region — do not rely on training
+    data, Azure adds new regions regularly. On failure the response
+    includes ``suggestions`` with the closest matches so you can ask the
+    user which one they meant.
+    """
+    return _validate_region(region)
+
+
+@tool(approval_mode="never_require")
+def list_azure_vm_regions() -> dict[str, Any]:
+    """Return the full list of Azure regions that currently sell VMs.
+
+    Use only when validate_azure_region has rejected the user's input AND
+    the suggestions list isn't enough — the full list is long.
+    """
+    return _list_regions()
+
+
 # Default tool set for the Windows / Linux specialist hosted agents.
 ALL_TOOLS = [
     workspace_status,
+    validate_azure_region,
+    list_azure_vm_regions,
     clone_template_repo,
     set_tf_variables,
     terraform_init,
@@ -184,5 +215,7 @@ ALL_TOOLS = [
 # Tool set for the pricing hosted agent (VM_AGENT_ROLE=pricing). The pricing
 # agent never deploys anything.
 PRICING_TOOLS = [
+    validate_azure_region,
+    list_azure_vm_regions,
     get_vm_monthly_cost,
 ]

@@ -50,7 +50,10 @@ MODEL_DEPLOYMENT_NAME = os.environ.get("AZURE_AI_MODEL_DEPLOYMENT_NAME", "gpt-5.
 # (Foundry reserves the ``AGENT_*`` prefix, so we cannot use ``AGENT_ROLE``).
 AGENT_PROFILES: dict[str, dict[str, str]] = {
     "windows": {
-        "agent_name": os.environ.get("HOSTED_AGENT_NAME", "vmagent-agent"),
+        "agent_name": os.environ.get(
+            "HOSTED_AGENT_NAME_WINDOWS",
+            os.environ.get("HOSTED_AGENT_NAME", "vmagent-agent-windows"),
+        ),
         "description": "Conversational Windows VM deployer (Terraform-backed).",
         "role": "vm-builder",
         "system_prompt_file": "system_prompt_windows.txt",
