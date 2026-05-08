@@ -2,26 +2,59 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>VM Hosted Agent</title>
-  <link rel="stylesheet" href="/static/style.css" />
+  <title>Task Orchestrator</title>
+  <link rel="stylesheet" href="/static/styles.css" />
 </head>
 <body>
-  <header>
-    <h1>VM Hosted Agent</h1>
+  <header data-orchestrator="{{ orchestrator_agent_name }}"
+          data-agent-windows="{{ hosted_agent_name_windows }}"
+          data-agent-linux="{{ hosted_agent_name_linux }}"
+          data-agent-pricing="{{ hosted_agent_name_pricing }}">
+    <h1>Task Orchestrator</h1>
     <span class="user">{{ user }}</span>
+    <span class="agent" id="active-agent-display">{{ orchestrator_agent_name }}</span>
+    <span class="active-agent" id="handoff-banner" hidden>
+      <span class="active-agent-label">→ routing to</span>
+      <span id="handoff-target"></span>
+    </span>
+    <span class="active-agent" id="handback-banner" hidden>
+      <span class="active-agent-label">↩ returning to</span>
+      <span id="handback-target"></span>
+    </span>
+    <span class="tokens" id="token-counter" title="Total tokens used this session (input + output). A trailing ~ means the count is a client-side estimate (Foundry didn't report usage).">
+      tokens: <span id="token-total">0</span>
+      <span class="token-detail">(in <span id="token-in">0</span> / out <span id="token-out">0</span>)</span>
+    </span>
+    <button type="button" id="start-over" class="start-over" title="Clear all conversation history and start a fresh session.">Start over</button>
   </header>
+
   <main>
-    <section class="chat">
-      <p>Chat UI placeholder &mdash; built in <code>frontend-ui</code> todo.</p>
+    <section id="chat-pane">
+      <div id="messages" aria-live="polite"></div>
+      <form id="chat-form" autocomplete="off">
+        <input type="text" id="message" name="message"
+               placeholder="Tell me what kind of VM you want to deploy (Windows or Linux)..."
+               autofocus required />
+        <button type="submit" id="send">Send</button>
+      </form>
     </section>
-    <aside class="tools">
+
+    <aside id="tools-pane">
       <h2>Tool calls</h2>
-      <p>Live tool-call panel placeholder.</p>
+      <ol id="tools-list"></ol>
     </aside>
-    <aside class="logs">
-      <h2>Terraform output</h2>
-      <pre>(empty)</pre>
+
+    <aside id="log-pane">
+      <h2>Terraform log</h2>
+      <pre id="tf-log"></pre>
     </aside>
   </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.11/dist/purify.min.js" crossorigin="anonymous"></script>
+  <script src="/static/app.js"></script>
+  <footer>
+    <span class="frontend-version">frontend v{{ frontend_version }}</span>
+  </footer>
 </body>
 </html>

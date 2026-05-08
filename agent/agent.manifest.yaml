@@ -1,0 +1,35 @@
+name: vmagent-agent
+description: >
+  Conversational Windows VM deployer. Collects parameters via chat and
+  orchestrates Terraform tools (clone template, init, plan, apply) to
+  deploy a single Windows VM.
+metadata:
+  tags:
+    - Agent Framework
+    - AI Agent Hosting
+    - Azure AI AgentServer
+    - Responses Protocol
+    - Terraform
+template:
+  name: vmagent-agent
+  kind: hosted
+  protocols:
+    - protocol: responses
+      version: 1.0.0
+  environment_variables:
+    - name: AZURE_AI_MODEL_DEPLOYMENT_NAME
+      value: "{{AZURE_AI_MODEL_DEPLOYMENT_NAME}}"
+    - name: TFSTATE_STORAGE_ACCOUNT_NAME
+      value: "{{TFSTATE_STORAGE_ACCOUNT_NAME}}"
+    - name: TFSTATE_CONTAINER_NAME
+      value: "{{TFSTATE_CONTAINER_NAME}}"
+    - name: TFSTATE_RESOURCE_GROUP
+      value: "{{TFSTATE_RESOURCE_GROUP}}"
+    - name: KEYVAULT_URI
+      value: "{{KEYVAULT_URI}}"
+    - name: VM_TARGET_SUBSCRIPTION_ID
+      value: "{{VM_TARGET_SUBSCRIPTION_ID}}"
+resources:
+  - kind: model
+    id: gpt-5.1
+    name: AZURE_AI_MODEL_DEPLOYMENT_NAME

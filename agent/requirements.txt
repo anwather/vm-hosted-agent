@@ -1,6 +1,15 @@
-azure-ai-agentserver-core
-azure-ai-agentserver-responses
-azure-identity>=1.17.0
-azure-keyvault-secrets>=4.8.0
+# Foundry Hosted Agent — VM Deploy Assistant
+# Canonical pattern from microsoft-foundry/foundry-samples (responses/02-tools)
+agent-framework>=1.1.1
+agent-framework-foundry-hosting
+
+# For deploying via SDK (deploy/deploy_agent.py)
+azure-ai-projects>=2.1.0
+
+# For our local tools
+azure-identity
+azure-keyvault-secrets
+pydantic
+
+# Telemetry (optional — picked up automatically when APPLICATIONINSIGHTS_CONNECTION_STRING is set)
 azure-monitor-opentelemetry
-openai>=1.50.0

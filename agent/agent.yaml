@@ -1,0 +1,8 @@
+kind: hosted
+name: vmagent-agent
+protocols:
+  - protocol: responses
+    version: 1.0.0
+resources:
+  cpu: "1"
+  memory: 2Gi

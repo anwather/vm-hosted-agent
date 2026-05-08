@@ -1,6 +1,6 @@
-name: vm-hosted-agent
+name: task-orchestrator
 metadata:
-  template: vm-hosted-agent@0.1.0
+  template: task-orchestrator@0.2.0
 
 infra:
   provider: bicep
