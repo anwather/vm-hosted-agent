@@ -77,8 +77,28 @@ az role assignment create `
     --role 'AcrPull' `
     --scope $acrId 2>&1 | Out-Null
 # rc != 0 with "already exists" message is fine; only fail if scope/principal genuinely bad.
-# Allow up to 60s for AAD propagation before downstream image pulls.
-Write-Host "postprovision: waiting 60s for AcrPull RBAC propagation"
+
+# Grant 'Azure AI User' on the Foundry PROJECT scope to the frontend container
+# app's user-assigned managed identity. This is what lets the frontend
+# orchestrator call /agents/* data-plane operations (e.g. createResponse).
+# Without it, the very first user message returns 403 with
+# "does not have permissions for Microsoft.MachineLearningServices/workspaces/agents/action".
+$frontendMiPid = $env:FRONTEND_IDENTITY_PRINCIPAL_ID
+if ([string]::IsNullOrWhiteSpace($frontendMiPid)) {
+    Write-Warning "postprovision: FRONTEND_IDENTITY_PRINCIPAL_ID not set; skipping Azure AI User grant on Foundry project. Frontend chats will return 403 until this is granted."
+} else {
+    $projScope = "/subscriptions/$subId2/resourceGroups/$foundryRg2/providers/Microsoft.CognitiveServices/accounts/$foundryAcct2/projects/$foundryProj2"
+    Write-Host "postprovision: granting 'Azure AI User' on Foundry project to frontend MI $frontendMiPid"
+    az role assignment create `
+        --assignee-object-id $frontendMiPid `
+        --assignee-principal-type ServicePrincipal `
+        --role 'Azure AI User' `
+        --scope $projScope 2>&1 | Out-Null
+    # Idempotent: az returns success on duplicate; "already exists" is benign.
+}
+
+# Allow up to 60s for AAD propagation before downstream image pulls + agent calls.
+Write-Host "postprovision: waiting 60s for RBAC propagation"
 Start-Sleep -Seconds 60
 
 # Derive KEYVAULT_NAME from URI if not already set (bicep emits both).

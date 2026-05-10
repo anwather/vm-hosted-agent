@@ -55,7 +55,24 @@ az role assignment create \
     --assignee-principal-type ServicePrincipal \
     --role 'AcrPull' \
     --scope "$acr_id" >/dev/null 2>&1 || true
-echo "postprovision: waiting 60s for AcrPull RBAC propagation"
+
+# Grant 'Azure AI User' on the Foundry PROJECT scope to the frontend container
+# app's user-assigned MI. Without this, the orchestrator hits 403 on the very
+# first user message ("does not have permissions for ... /workspaces/agents/action").
+frontend_mi="${FRONTEND_IDENTITY_PRINCIPAL_ID:-}"
+if [ -z "$frontend_mi" ]; then
+    echo "postprovision: FRONTEND_IDENTITY_PRINCIPAL_ID not set; skipping Azure AI User grant on Foundry project. Frontend chats will return 403 until this is granted." 1>&2
+else
+    proj_scope="/subscriptions/${sub_id}/resourceGroups/${foundry_rg}/providers/Microsoft.CognitiveServices/accounts/${foundry_acct}/projects/${foundry_proj}"
+    echo "postprovision: granting 'Azure AI User' on Foundry project to frontend MI $frontend_mi"
+    az role assignment create \
+        --assignee-object-id "$frontend_mi" \
+        --assignee-principal-type ServicePrincipal \
+        --role 'Azure AI User' \
+        --scope "$proj_scope" >/dev/null 2>&1 || true
+fi
+
+echo "postprovision: waiting 60s for RBAC propagation"
 sleep 60
 
 if [ -z "${KEYVAULT_NAME:-}" ] && [ -n "${KEYVAULT_URI:-}" ]; then
