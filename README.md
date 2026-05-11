@@ -96,17 +96,22 @@ public or extend `agent/tools/git_clone.py` to inject a PAT). Subfolders
 ### Azure tenant / Entra ID requirements
 
 * Tenant role **Application Administrator** (or Cloud Application
-  Administrator / Global Administrator) on the deployer account — required
-  to create the Entra App Registration used for Easy Auth.
-  **Only needed if you opt in** with `azd env set EASY_AUTH_ENABLED true`;
-  the frontend is anonymous by default.
+  Administrator / Global Administrator) on the deployer account is only
+  required for the **self-managed** Easy Auth path, where the azd hook creates
+  the Entra app registration for you.
+* If a different team owns Entra app registrations, use the **delegated**
+  Easy Auth path instead. In that mode the deployer does **not** need
+  app-registration permissions; the Entra team creates the app registration
+  and enterprise application, then returns the client ID + client secret so a
+  later `azd provision` run can finish wiring Container Apps auth.
 * Tenant role **User Access Administrator** (or Owner) at the target
   subscription — required for `assign_rbac.py` to grant the hosted agent's
   managed identity Contributor + data-plane roles. `Contributor` alone is
   NOT enough to assign roles to others.
-* You must be able to **consent to delegated User.Read** for the Entra app
-  (default admin consent on a single-tenant app is automatic; multi-tenant
-  setups need explicit admin consent).
+* For Easy Auth, the Entra app's redirect URI must exactly match
+  `https://<fqdn>/.auth/login/aad/callback`. In delegated mode, send the
+  Container Apps FQDN from the first `azd up` run to the Entra team so they
+  can create the app registration with the correct URI.
 
 ### Foundry account, project, capability host
 
@@ -192,16 +197,24 @@ azd up                                  # provision infra, build agent image, de
 2. Provision infra (`infra/main.bicep`).
 3. Run `postprovision` to:
    * `az acr build` the agent image into the new ACR
+   * Grant `AcrPull` on the new ACR to the Foundry account's MI (so Foundry
+     can pull the hosted-agent image at `create_version` time)
+   * Grant `Azure AI User` on the Foundry **project** to the frontend
+     container app's user-assigned MI (so the orchestrator can call
+     `/agents/*` data-plane operations — without this the very first chat
+     returns `403 ... /workspaces/agents/action`)
    * `python deploy/deploy_all.py` to (re)create the orchestrator + windows
-     + linux + pricing hosted agents and assign RBAC to each new MI
+     + linux + pricing hosted agents and assign per-version-MI RBAC
 4. Build & deploy the frontend container app image. Build runs **remotely
    in ACR** (via `remoteBuild: true` in `azure.yaml`) — no local Docker
    daemon required.
 
 Easy Auth (Entra SSO) is **opt-in via `azd env set EASY_AUTH_ENABLED true`**.
-When enabled, the postprovision hook (`infra/hooks/easyauth.ps1`) idempotently
-creates the Entra app registration, generates a client secret, and wires the
-container app's auth config — no manual step required. See
+By default the postprovision hook (`infra/hooks/easyauth.ps1`) runs in
+**managed** mode, where it idempotently creates the Entra app registration,
+generates a client secret, and wires the container app's auth config. It also
+supports a **delegated** mode for teams that cannot create app registrations
+themselves; see
 [**Optional: Easy Auth (Entra SSO)**](#optional-easy-auth-entra-sso) below.
 
 To re-deploy just the agent code:
@@ -216,13 +229,18 @@ azd deploy frontend
 
 ### Optional: Easy Auth (Entra SSO)
 
-The frontend container app is **anonymous by default** (no auth at the
-ingress). To require Entra ID sign-in for everyone hitting the public URL,
-opt in once before `azd up`:
+The frontend container app is **anonymous by default**. To require Entra ID
+sign-in for everyone hitting the public URL, choose one of the two Easy Auth
+flows below.
+
+#### Option A: self-managed app registration
+
+Use this when the deployer **does** have Entra app-registration permissions.
 
 ```powershell
 azd env set EASY_AUTH_ENABLED true
-azd up                    # or `azd provision` if you've already run it
+azd env set EASY_AUTH_REGISTRATION_MODE managed   # default; optional
+azd up                                            # or `azd provision`
 ```
 
 The postprovision hook (`infra/hooks/easyauth.ps1`, with a posix twin
@@ -231,18 +249,18 @@ The postprovision hook (`infra/hooks/easyauth.ps1`, with a posix twin
 1. Create or update an Entra app registration named
    `<frontend-app-name>-easyauth` with redirect URI
    `https://<fqdn>/.auth/login/aad/callback`.
-2. Generate a 1-year client secret (only on first run; reuses existing
-   secret on subsequent runs — pass `-Rotate` to force rotation).
-3. Wire `az containerapp auth microsoft update` and require sign-in
+2. Create the enterprise application / service principal if needed.
+3. Generate a 1-year client secret (only on first run; reuses the existing
+   secret on subsequent runs unless you rotate it).
+4. Wire `az containerapp auth microsoft update` and require sign-in
    (`--action RedirectToLoginPage`).
-4. Persist `EASY_AUTH_APP_ID` + `EASY_AUTH_APP_DISPLAY_NAME` back to the
-   azd env so subsequent runs are idempotent.
+5. Persist `EASY_AUTH_APP_ID` + `EASY_AUTH_APP_DISPLAY_NAME` back to the
+   azd env so subsequent runs stay idempotent.
 
 **Required permissions on the deployer account:**
 * **Application Administrator** (or Cloud Application Admin / Global
-  Admin) on the tenant — to create the app registration.
-* **Owner** or **Contributor** on the resource group — already needed for
-  the rest of the deploy.
+  Admin) on the tenant.
+* **Owner** or **Contributor** on the resource group.
 
 To rotate the secret manually any time:
 ```powershell
@@ -250,12 +268,52 @@ $env:EASY_AUTH_ENABLED = 'true'
 .\infra\hooks\easyauth.ps1 -Rotate
 ```
 
+#### Option B: delegated app registration
+
+Use this when a different team owns Entra app registrations.
+
+1. Turn on Easy Auth, but tell the hook the app registration is external:
+   ```powershell
+   azd env set EASY_AUTH_ENABLED true
+   azd env set EASY_AUTH_REGISTRATION_MODE external
+   azd up
+   ```
+2. The first run provisions infra, then the Easy Auth hook prints a handoff
+   block containing:
+   * the frontend FQDN
+   * the exact redirect URI
+   * a display-name suggestion
+   * a reminder that the Entra team must create the **enterprise
+     application / service principal** as part of setup
+3. Send those details to the Entra team and ask them to return:
+   * the **Application (client) ID**
+   * the **client secret value**
+4. Once they reply, set the returned values and rerun provisioning:
+   ```powershell
+   azd env set EASY_AUTH_CLIENT_ID <app-id>
+   $env:EASY_AUTH_CLIENT_SECRET = '<secret>'
+   azd provision
+   ```
+
+Optional delegated-mode overrides:
+
+| Variable | Purpose |
+|---|---|
+| `EASY_AUTH_APP_DISPLAY_NAME` | Override the suggested app-registration display name |
+| `EASY_AUTH_TENANT_ID` | Override the tenant used for the issuer URL |
+| `EASY_AUTH_ALLOWED_AUDIENCES` | Comma-separated list passed to `--allowed-token-audiences` |
+
+> `azd env set EASY_AUTH_CLIENT_SECRET ...` also works, but it stores the
+> secret in the local azd environment file. Prefer a process environment
+> variable or your team's approved local secret-handling approach.
+
 To remove Easy Auth:
 ```powershell
 az containerapp auth update -n <frontend-app-name> -g <rg> --enabled false
 azd env set EASY_AUTH_ENABLED false
 ```
-(The Entra app registration persists — delete it manually with
+(The Entra app registration persists. In the delegated path it is owned by the
+other team; in the self-managed path you can delete it manually with
 `az ad app delete --id $(azd env get-value EASY_AUTH_APP_ID)` if desired.)
 
 ## Quickstart (manual, without azd)
@@ -325,10 +383,14 @@ az containerapp update -n vmagent-frontend -g multi-agent-demo `
                  HOSTED_AGENT_NAME_LINUX=vmagent-agent-linux `
                  HOSTED_AGENT_NAME_PRICING=vmagent-agent-pricing
 
-# 5) Easy Auth (Entra) on the frontend — one-time, needs App Admin role
+# 5) Easy Auth (Entra) on the frontend - one-time, needs App Admin role
+#    If another team owns app registrations, send them the redirect URI below
+#    and ask them to create the app + enterprise application, then give you
+#    the client ID + secret for the final `az containerapp auth ...` commands.
 $appId = az ad app create --display-name "Task Orchestrator" `
   --web-redirect-uris "https://$FQDN/.auth/login/aad/callback" `
   --query appId -o tsv
+$null = az ad sp create --id $appId
 $secret = az ad app credential reset --id $appId --years 1 --query password -o tsv
 az containerapp auth microsoft update -n vmagent-frontend -g multi-agent-demo `
   --client-id $appId --client-secret $secret `
@@ -551,10 +613,11 @@ applied before paint to avoid a flash.
 
 ### Easy Auth pitfall
 
-When the redirect URI on the Entra app registration doesn't exactly match
+When the redirect URI on the Entra app registration does not exactly match
 `https://<fqdn>/.auth/login/aad/callback` you get a generic "page isn't
-working" error after sign-in — fix by re-saving the URI on the app
-registration.
+working" error after sign-in. In delegated mode, also make sure the Entra team
+created the **enterprise application / service principal** for the app;
+otherwise login can fail even when the redirect URI is correct.
 
 ### Handback prompt rules (Phase J/K)
 
