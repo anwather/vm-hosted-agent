@@ -1,8 +1,9 @@
 #!/usr/bin/env pwsh
 # Validates env vars required by the postprovision hook + deploy_all.py.
 # azd already prompts for FOUNDRY_PROJECT_ENDPOINT (it's a bicep param);
-# here we sanity-check it and the foundry RG, plus derive account/project
-# names from the endpoint URL so they're available to later hooks.
+# here we sanity-check it, make sure azd deploys the template infra into a
+# separate resource group, and derive account/project names from the endpoint
+# URL so they're available to later hooks.
 
 $ErrorActionPreference = 'Stop'
 
@@ -19,8 +20,48 @@ Set with: azd env set $Name <value>
     }
 }
 
+function Normalize-Name {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return '' }
+    return $Value.Trim().ToLowerInvariant()
+}
+
 Require-EnvVar 'FOUNDRY_PROJECT_ENDPOINT' 'Full Foundry project endpoint, e.g. https://myacct.services.ai.azure.com/api/projects/myproj'
 Require-EnvVar 'FOUNDRY_RG'                'Resource group of the Foundry CognitiveServices account'
+
+$envName = [Environment]::GetEnvironmentVariable('AZURE_ENV_NAME')
+$infraRg = [Environment]::GetEnvironmentVariable('AZURE_RESOURCE_GROUP')
+if ([string]::IsNullOrWhiteSpace($infraRg)) {
+    if ([string]::IsNullOrWhiteSpace($envName)) {
+        Write-Error @"
+Missing required env var: AZURE_RESOURCE_GROUP
+Could not derive a default because AZURE_ENV_NAME is not set.
+
+Set with: azd env set AZURE_RESOURCE_GROUP <new-resource-group-name>
+"@
+        exit 1
+    }
+
+    $infraRg = "rg-$($envName.Trim().ToLowerInvariant())"
+    azd env set AZURE_RESOURCE_GROUP $infraRg | Out-Null
+    $env:AZURE_RESOURCE_GROUP = $infraRg
+    Write-Host "preprovision: defaulting AZURE_RESOURCE_GROUP to $infraRg"
+}
+
+if ((Normalize-Name $infraRg) -eq (Normalize-Name $env:FOUNDRY_RG)) {
+    Write-Error @"
+AZURE_RESOURCE_GROUP and FOUNDRY_RG must be different resource groups.
+azd provisions the template infrastructure into AZURE_RESOURCE_GROUP, while
+FOUNDRY_RG must point at the existing Foundry account's resource group.
+
+Current values:
+  AZURE_RESOURCE_GROUP = $infraRg
+  FOUNDRY_RG           = $($env:FOUNDRY_RG)
+
+Set with: azd env set AZURE_RESOURCE_GROUP <new-resource-group-name>
+"@
+    exit 1
+}
 
 $endpoint = $env:FOUNDRY_PROJECT_ENDPOINT
 if ($endpoint -notmatch '^https?://([^.]+)\.services\.ai\.azure\.com/api/projects/([^/?#]+)/?$') {

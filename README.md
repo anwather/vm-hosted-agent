@@ -82,7 +82,9 @@ with subfolders `windows/` and `linux/`.
   Can be the same subscription; if different, you must be logged in as a
   principal with Contributor on the Foundry resource group as well.
 * One **resource group** for the demo infra (this README uses
-  `multi-agent-demo`). All Bicep resources land here.
+  `rg-task-orchestrator`). All Bicep resources land here.
+* The **Foundry resource group stays separate**. The template does not deploy
+  ACR, Key Vault, Storage, or Container Apps into the Foundry RG.
 
 ### VM template repo (public)
 
@@ -177,6 +179,7 @@ Foundry, and reassign per-version managed-identity RBAC.
 ```powershell
 azd auth login
 azd init                                # only on first clone — pick env name + region
+azd env set AZURE_RESOURCE_GROUP      "rg-task-orchestrator"
 azd env set FOUNDRY_PROJECT_ENDPOINT  "https://<acct>.services.ai.azure.com/api/projects/<proj>"
 azd env set FOUNDRY_RG                "<foundry-rg>"
 # Optional overrides:
@@ -187,6 +190,8 @@ azd up                                  # provision infra, build agent image, de
 
 `azd up` will:
 1. Run `preprovision` to validate `FOUNDRY_PROJECT_ENDPOINT` + `FOUNDRY_RG`,
+   set `AZURE_RESOURCE_GROUP` to a dedicated app RG if it is unset (defaults
+   to `rg-<azd-env-name>`), refuse to reuse the Foundry RG for template infra,
    derive `FOUNDRY_ACCOUNT_NAME` / `FOUNDRY_PROJECT_NAME` into the azd env,
    and PUT the Foundry account's `agents` capability host (idempotent).
 2. Provision infra (`infra/main.bicep`).
@@ -197,6 +202,10 @@ azd up                                  # provision infra, build agent image, de
 4. Build & deploy the frontend container app image. Build runs **remotely
    in ACR** (via `remoteBuild: true` in `azure.yaml`) — no local Docker
    daemon required.
+
+`AZURE_RESOURCE_GROUP` controls where azd creates and deletes the template
+resources. `FOUNDRY_RG` must stay pointed at the existing Foundry account's
+resource group; `azd down` only targets `AZURE_RESOURCE_GROUP`.
 
 Easy Auth (Entra SSO) is **opt-in via `azd env set EASY_AUTH_ENABLED true`**.
 When enabled, the postprovision hook (`infra/hooks/easyauth.ps1`) idempotently
@@ -279,15 +288,15 @@ az rest --method put --uri $capUri --headers "Content-Type=application/json" --b
 do { Start-Sleep 10; $s = az rest --method get --uri $capUri --query properties.provisioningState -o tsv; "  capabilityHost state=$s" } while ($s -notin 'Succeeded','Failed','Canceled')
 
 # 1) Provision infra
-az group create -n multi-agent-demo -l australiaeast
+az group create -n rg-task-orchestrator -l australiaeast
 az deployment group create `
-  -g multi-agent-demo `
+  -g rg-task-orchestrator `
   -f infra/main.bicep `
   -p targetSubscriptionId=<TARGET_SUB_ID> `
      foundryProjectEndpoint=https://<FOUNDRY_ACCT>.services.ai.azure.com/api/projects/<PROJECT>
 
 # Capture outputs you'll reuse below
-$out = az deployment group show -g multi-agent-demo -n main --query properties.outputs -o json | ConvertFrom-Json
+$out = az deployment group show -g rg-task-orchestrator -n main --query properties.outputs -o json | ConvertFrom-Json
 $ACR   = $out.AZURE_CONTAINER_REGISTRY_NAME.value
 $KVURI = $out.KEYVAULT_URI.value
 $STG   = $out.TFSTATE_STORAGE_ACCOUNT_NAME.value
@@ -305,7 +314,7 @@ az acr build --registry $ACR --image vmagent-frontend:0.5.1 --file frontend/Dock
 $env:FOUNDRY_PROJECT_ENDPOINT      = "https://<FOUNDRY_ACCT>.services.ai.azure.com/api/projects/<PROJECT>"
 $env:CONTAINER_IMAGE               = "$ACR.azurecr.io/vmagent-agent:0.5.1"
 $env:TFSTATE_STORAGE_ACCOUNT_NAME  = $STG
-$env:TFSTATE_RESOURCE_GROUP        = "multi-agent-demo"
+$env:TFSTATE_RESOURCE_GROUP        = "rg-task-orchestrator"
 $env:KEYVAULT_URI                  = $KVURI
 $env:KEYVAULT_NAME                 = ($KVURI -replace 'https://','' -replace '\.vault\.azure\.net/?$','')
 $env:VM_TARGET_SUBSCRIPTION_ID     = "<TARGET_SUB_ID>"
@@ -317,7 +326,7 @@ python deploy/deploy_all.py
 # (windows, linux, pricing) plus the orchestrator are now ACTIVE.
 
 # 4) Update the frontend container app with the new image + version label
-az containerapp update -n vmagent-frontend -g multi-agent-demo `
+az containerapp update -n vmagent-frontend -g rg-task-orchestrator `
   --image "$ACR.azurecr.io/vmagent-frontend:0.5.1" `
   --set-env-vars FRONTEND_VERSION=0.5.1 `
                  ORCHESTRATOR_AGENT_NAME=taskorch-orchestrator `
@@ -330,10 +339,10 @@ $appId = az ad app create --display-name "Task Orchestrator" `
   --web-redirect-uris "https://$FQDN/.auth/login/aad/callback" `
   --query appId -o tsv
 $secret = az ad app credential reset --id $appId --years 1 --query password -o tsv
-az containerapp auth microsoft update -n vmagent-frontend -g multi-agent-demo `
+az containerapp auth microsoft update -n vmagent-frontend -g rg-task-orchestrator `
   --client-id $appId --client-secret $secret `
   --tenant-id (az account show --query tenantId -o tsv) --yes
-az containerapp auth update -n vmagent-frontend -g multi-agent-demo `
+az containerapp auth update -n vmagent-frontend -g rg-task-orchestrator `
   --enabled true --action RedirectToLoginPage --redirect-provider azureactivedirectory
 ```
 
@@ -656,7 +665,7 @@ deleted explicitly.
 azd down --purge --force          # deletes the demo RG; purges KV/ACR soft-delete
 
 # B) If you deployed manually:
-az group delete -n multi-agent-demo --yes
+az group delete -n rg-task-orchestrator --yes
 # Key Vault has soft-delete enabled; purge it so the next deploy can reuse the name:
 az keyvault purge --name <KV_NAME> --location australiaeast 2>$null
 
@@ -673,7 +682,7 @@ az keyvault purge --name <KV_NAME> --location australiaeast 2>$null
 az ad app delete --id (az ad app list --display-name "Task Orchestrator" --query "[0].appId" -o tsv)
 
 # C) Clean any test VMs the agent built (they live in the TARGET subscription,
-#    NOT in multi-agent-demo). The agent uses RG names like 'demo-vm-<name>'.
+#    NOT in rg-task-orchestrator). The agent uses RG names like 'demo-vm-<name>'.
 az group list --query "[?starts_with(name,'demo-vm-')].name" -o tsv |
   ForEach-Object { az group delete -n $_ --yes --no-wait }
 ```

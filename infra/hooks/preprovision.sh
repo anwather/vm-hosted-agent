@@ -1,5 +1,7 @@
 #!/usr/bin/env sh
 # Validates env vars required by the postprovision hook + deploy_all.py.
+# Also makes sure azd deploys the template infra into a resource group that is
+# separate from the existing Foundry resource group.
 set -e
 
 require_env() {
@@ -16,6 +18,38 @@ require_env() {
 
 require_env FOUNDRY_PROJECT_ENDPOINT 'Full Foundry project endpoint, e.g. https://myacct.services.ai.azure.com/api/projects/myproj'
 require_env FOUNDRY_RG               'Resource group of the Foundry CognitiveServices account'
+
+normalize_name() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | xargs
+}
+
+infra_rg="${AZURE_RESOURCE_GROUP:-}"
+env_name="${AZURE_ENV_NAME:-}"
+if [ -z "$infra_rg" ]; then
+    if [ -z "$env_name" ]; then
+        echo "Missing required env var: AZURE_RESOURCE_GROUP" 1>&2
+        echo "Could not derive a default because AZURE_ENV_NAME is not set." 1>&2
+        echo "Set with: azd env set AZURE_RESOURCE_GROUP <new-resource-group-name>" 1>&2
+        exit 1
+    fi
+
+    infra_rg="rg-$(printf '%s' "$env_name" | tr '[:upper:]' '[:lower:]' | xargs)"
+    azd env set AZURE_RESOURCE_GROUP "$infra_rg" >/dev/null
+    export AZURE_RESOURCE_GROUP="$infra_rg"
+    echo "preprovision: defaulting AZURE_RESOURCE_GROUP to $infra_rg"
+fi
+
+if [ "$(normalize_name "$infra_rg")" = "$(normalize_name "$FOUNDRY_RG")" ]; then
+    echo "AZURE_RESOURCE_GROUP and FOUNDRY_RG must be different resource groups." 1>&2
+    echo "azd provisions the template infrastructure into AZURE_RESOURCE_GROUP, while FOUNDRY_RG must point at the existing Foundry account's resource group." 1>&2
+    echo "" 1>&2
+    echo "Current values:" 1>&2
+    echo "  AZURE_RESOURCE_GROUP = $infra_rg" 1>&2
+    echo "  FOUNDRY_RG           = $FOUNDRY_RG" 1>&2
+    echo "" 1>&2
+    echo "Set with: azd env set AZURE_RESOURCE_GROUP <new-resource-group-name>" 1>&2
+    exit 1
+fi
 
 endpoint="$FOUNDRY_PROJECT_ENDPOINT"
 account=$(printf '%s' "$endpoint" | sed -nE 's#^https?://([^.]+)\.services\.ai\.azure\.com/api/projects/([^/?#]+)/?$#\1#p')
