@@ -99,9 +99,9 @@ public or extend `agent/tools/git_clone.py` to inject a PAT). Subfolders
 
 * Tenant role **Application Administrator** (or Cloud Application
   Administrator / Global Administrator) on the deployer account — required
-  to create the Entra App Registration used for Easy Auth.
-  **Only needed if you opt in** with `azd env set EASY_AUTH_ENABLED true`;
-  the frontend is anonymous by default.
+  only if you want this repo's Easy Auth hook to create the Entra App
+  Registration for you. If another team creates the app registration
+  separately, the frontend can still be wired manually later.
 * Tenant role **User Access Administrator** (or Owner) at the target
   subscription — required for `assign_rbac.py` to grant the hosted agent's
   managed identity Contributor + data-plane roles. `Contributor` alone is
@@ -252,6 +252,87 @@ The postprovision hook (`infra/hooks/easyauth.ps1`, with a posix twin
   Admin) on the tenant — to create the app registration.
 * **Owner** or **Contributor** on the resource group — already needed for
   the rest of the deploy.
+
+### Manual / delegated Entra app registration
+
+If the team running `azd` **cannot** create app registrations in Entra, split
+the work:
+
+1. **Platform / identity team** creates the Entra app registration and client
+   secret.
+2. **Deployment team** wires the existing app into the frontend Container App
+   auth config.
+
+#### What the identity team must create
+
+Use the frontend FQDN from the deployed Container App and create a
+**single-tenant** app registration with:
+
+- **Display name:** any name you prefer (for example
+  `<frontend-app-name>-easyauth`)
+- **Redirect URI:** `https://<frontend-fqdn>/.auth/login/aad/callback`
+- **ID tokens enabled:** yes
+- **Sign-in audience:** `AzureADMyOrg`
+
+Then create a **client secret** and provide these values to the deployment
+team:
+
+- `tenant_id`
+- `client_id` (Application / app ID)
+- `client_secret` (**the secret value itself**, captured when it is created)
+
+> The client secret value is only shown once in Entra. Capture it at creation
+> time and hand it over securely. It is not committed to the repo and should
+> not be stored in source control.
+
+#### How the deployment team uses the client secret
+
+After the frontend Container App exists and you know its FQDN:
+
+```powershell
+$rg = "<app-resource-group>"
+$appName = "<frontend-app-name>"
+$fqdn = "<frontend-fqdn>"
+$tenantId = "<tenant-id>"
+$clientId = "<client-id>"
+$clientSecret = "<client-secret-value>"
+$issuer = "https://sts.windows.net/$tenantId/v2.0"
+
+az containerapp auth microsoft update `
+  -n $appName -g $rg `
+  --client-id $clientId `
+  --client-secret $clientSecret `
+  --client-secret-name aad-client-secret `
+  --tenant-id $tenantId `
+  --issuer $issuer `
+  --allowed-token-audiences "api://$clientId,$clientId" `
+  --yes
+
+az containerapp auth update `
+  -n $appName -g $rg `
+  --enabled true `
+  --action RedirectToLoginPage `
+  --redirect-provider azureactivedirectory `
+  --excluded-paths '/.auth/*,/health,/healthz'
+```
+
+That command stores the secret in the Container App's secret store under the
+name `aad-client-secret` and configures the Microsoft identity provider to use
+it. The secret value does **not** need to be written into `azure.yaml`,
+`azd` env files, or the repository.
+
+Recommended follow-up so future operators know which app registration is in
+use:
+
+```powershell
+azd env set EASY_AUTH_ENABLED true
+azd env set EASY_AUTH_APP_ID $clientId
+azd env set EASY_AUTH_APP_DISPLAY_NAME "<entra-app-display-name>"
+```
+
+If you later need to rotate the secret, the identity team creates a new client
+secret on the same app registration and the deployment team reruns
+`az containerapp auth microsoft update` with the **new secret value**.
 
 To rotate the secret manually any time:
 ```powershell
